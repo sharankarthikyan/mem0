@@ -221,7 +221,7 @@ flowchart TB
 </div>
 <div class="grid g2" style="margin-top:16px">
   <div class="card"><h4>Backend — default</h4><p class="muted">In-process LRU + TTL, per uvicorn worker. Zero infra. <span class="k">OPENMEMORY_CACHE_TTL · _MAX_ENTRIES · _SIM_THRESHOLD</span></p></div>
-  <div class="card"><h4>Backend — shared</h4><p class="muted">Set <code>REDIS_URL</code> → shared across all 4 workers, survives restarts. Use <code>rediss://</code> for TLS.</p></div>
+  <div class="card"><h4>Backend — shared</h4><p class="muted">Set <code>OPENMEMORY_REDIS_URL</code> → shared across all 4 workers, survives restarts. Use <code>rediss://</code> for TLS. (Dedicated var — not <code>REDIS_URL</code>, which selects a Redis vector store.)</p></div>
 </div>
 
 <!-- ============================ DATA MODEL ============================ -->
@@ -328,7 +328,7 @@ flowchart LR
     QDRANT_COLLECTION_NAME=openmemory_arctic_m_768<br/>
     FASTEMBED_CACHE_DIR=/data/fastembed_cache</p></div>
   <div class="card"><h4>Cache</h4>
-    <p class="k">REDIS_URL=rediss://… <span class="muted">(optional, shared)</span><br/>
+    <p class="k">OPENMEMORY_REDIS_URL=rediss://… <span class="muted">(optional, shared)</span><br/>
     OPENMEMORY_CACHE_TTL=300<br/>
     OPENMEMORY_CACHE_ENABLED=true</p></div>
   <div class="card"><h4>Security / LLM</h4>

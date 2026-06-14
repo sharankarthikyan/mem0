@@ -21,7 +21,7 @@ ollama==0.4.8
 # Self-hosted reranking (local ONNX cross-encoder, no torch) AND BM25 sparse
 # vectors for hybrid search. mem0 lists fastembed as optional, so pin it here.
 fastembed>=0.3.1
-# Optional: shared search cache backend (used only when REDIS_URL is set).
+# Optional: shared search cache backend (used only when OPENMEMORY_REDIS_URL is set).
 redis>=5.0.0
 # Opt-in external reranker (RERANKER_PROVIDER=cohere): `pip install cohere`.
 # Not installed by default — the default reranker is the self-hosted FastEmbed one.
