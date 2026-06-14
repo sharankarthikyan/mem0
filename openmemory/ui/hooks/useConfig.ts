@@ -31,7 +31,7 @@ export const useConfig = (): UseConfigApiReturn => {
   const [error, setError] = useState<string | null>(null);
   const dispatch = useDispatch<AppDispatch>();
   // Same-origin proxy base (see useMemoriesApi.ts). "" => relative /api/... URLs.
-  const URL = process.env.NEXT_PUBLIC_API_URL || "";
+  const URL = ""; // same-origin: always route through the Next /api proxy (CF Access)
 
   const fetchConfig = async () => {
     setIsLoading(true);

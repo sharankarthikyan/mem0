@@ -109,7 +109,7 @@ export const useMemoriesApi = (): UseMemoriesApiReturn => {
   // cross-domain cookie bounce) and removes the build-time NEXT_PUBLIC_API_URL
   // inlining + entrypoint-sed substitution as a point of failure. An override is
   // still honoured if NEXT_PUBLIC_API_URL is explicitly set to a real origin.
-  const URL = process.env.NEXT_PUBLIC_API_URL || "";
+  const URL = ""; // same-origin: always route through the Next /api proxy (CF Access)
 
   const fetchMemories = useCallback(async (
     query?: string,

@@ -68,7 +68,7 @@ export const useAppsApi = (): UseAppsApiReturn => {
   const user_id = useSelector((state: RootState) => state.profile.userId);
 
   // Same-origin proxy base (see useMemoriesApi.ts). "" => relative /api/... URLs.
-  const URL = process.env.NEXT_PUBLIC_API_URL || "";
+  const URL = ""; // same-origin: always route through the Next /api proxy (CF Access)
 
   const fetchApps = useCallback(async (params: FetchAppsParams = {}): Promise<{ apps: App[], total: number }> => {
     const {
