@@ -39,7 +39,11 @@ async function proxy(req: NextRequest, pathParts: string[]): Promise<Response> {
   if (CF_ACCESS_CLIENT_ID) headers.set("CF-Access-Client-Id", CF_ACCESS_CLIENT_ID);
   if (CF_ACCESS_CLIENT_SECRET) headers.set("CF-Access-Client-Secret", CF_ACCESS_CLIENT_SECRET);
 
-  const init: RequestInit = { method: req.method, headers, redirect: "manual" };
+  // Follow redirects server-side. FastAPI issues 307s for trailing-slash
+  // normalization (/memories -> /memories/); the hop stays on the same origin
+  // (mem0-mcp -> mem0-mcp) so undici keeps the CF-Access-* headers. The browser
+  // only ever sees the final response — no cross-origin Location leaks back.
+  const init: RequestInit = { method: req.method, headers, redirect: "follow" };
   if (req.method !== "GET" && req.method !== "HEAD") {
     const body = await req.arrayBuffer();
     if (body.byteLength > 0) init.body = body;
