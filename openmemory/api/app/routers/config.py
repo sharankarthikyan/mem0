@@ -47,28 +47,23 @@ class ConfigSchema(BaseModel):
     mem0: Optional[Mem0Config] = None
 
 def get_default_configuration():
-    """Get the default configuration with sensible defaults for LLM and embedder."""
+    """Default configuration: NO provider overrides.
+
+    The memory client (app/utils/memory.py) already auto-detects llm / embedder /
+    vector_store from environment variables. Pinning concrete providers here is a
+    DB override that WINS over the env — which previously forced an OpenAI
+    1536-dim embedder onto an arctic 768-dim deployment, silently breaking every
+    write and search with a vector-dimension mismatch (empty collection, empty
+    results). Defaulting these to None keeps env the single source of truth; users
+    can still set explicit overrides via the UI when they actually want one.
+    """
     return {
         "openmemory": {
             "custom_instructions": None
         },
         "mem0": {
-            "llm": {
-                "provider": "openai",
-                "config": {
-                    "model": "gpt-4o-mini",
-                    "temperature": 0.1,
-                    "max_tokens": 2000,
-                    "api_key": "env:OPENAI_API_KEY"
-                }
-            },
-            "embedder": {
-                "provider": "openai",
-                "config": {
-                    "model": "text-embedding-3-small",
-                    "api_key": "env:OPENAI_API_KEY"
-                }
-            },
+            "llm": None,
+            "embedder": None,
             "vector_store": None
         }
     }
