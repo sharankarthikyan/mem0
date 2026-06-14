@@ -112,7 +112,7 @@ class Category(Base):
     id = Column(UUID, primary_key=True, default=lambda: uuid.uuid4())
     name = Column(String, unique=True, nullable=False, index=True)
     description = Column(String)
-    created_at = Column(DateTime, default=datetime.datetime.now(datetime.UTC), index=True)
+    created_at = Column(DateTime, default=get_current_utc_time, index=True)
     updated_at = Column(DateTime,
                         default=get_current_utc_time,
                         onupdate=get_current_utc_time)
