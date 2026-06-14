@@ -67,29 +67,36 @@
     <span class="pill ext">● external (OpenAI)</span>
     <span class="pill new">● planned migration</span>
   </div>
-  <div class="meta">Stack: FastAPI · Qdrant (hybrid dense+BM25) · Postgres · FastEmbed ONNX reranker · Railway · <span class="tag">mem0-mcp.trybabble.io</span></div>
+  <div class="meta">Stack: FastAPI · Qdrant (hybrid dense+BM25) · SQLite (default) / Postgres (prod) · FastEmbed ONNX reranker · Cloudflare Access edge · Railway · <span class="tag">mem0-mcp.trybabble.io</span></div>
 </header>
 
 <!-- ============================ TOPOLOGY ============================ -->
 <h2>1 · Production topology (Railway)</h2>
-<p class="muted">Everything in the data plane is co-located and self-hosted on Railway. The only hops off-box today are to OpenAI for fact-extraction and embeddings — both targeted for in-infra replacement.</p>
+<p class="muted">Everything in the data plane is co-located and self-hosted on Railway, fronted by a <b>Cloudflare Access</b> zero-trust edge on the public hostnames. The only hops off-box today are to OpenAI for fact-extraction and embeddings — both targeted for in-infra replacement. The relational store is <b>SQLite by default</b> (<code>database.py</code>) and <b>Postgres in production</b> (when <code>DATABASE_URL</code> points at it); the diagram shows the production topology.</p>
 <div class="diagram">
 <pre class="mermaid">
 flowchart TB
-  subgraph CLIENT[" AI clients "]
+  subgraph CLIENT[" clients "]
     direction LR
-    C1["Claude / Cursor / Codex<br/>(MCP client)"]
-    C2["UI · Next.js<br/>(REST)"]
+    C1["Claude / Cursor / Codex<br/>(MCP client + CF service token)"]
+    B1["Browser<br/>(dashboard user)"]
   end
+
+  subgraph UIS[" openmemory-ui · Next.js (Railway) "]
+    direction TB
+    UIP["server-side proxy<br/>app/api/[...path]/route.ts<br/>injects CF-Access-Client-Id/Secret"]
+  end
+
+  CF{{"Cloudflare Access<br/>zero-trust edge<br/>(Service Auth policy)"}}
 
   subgraph RW[" Railway — private network "]
     direction TB
     MW["API-key middleware + CORS<br/><i>main.py</i>"]
-    API["openmemory-mcp<br/>FastAPI · uvicorn x4<br/><i>mem0-mcp.trybabble.io</i>"]
+    API["openmemory-mcp<br/>FastAPI · uvicorn x1 (Dockerfile)<br/><i>mem0-mcp.trybabble.io</i>"]
     subgraph DATA[" data plane (self-hosted) "]
       direction LR
-      PG[("Postgres<br/>metadata · ACL · audit")]
-      PITR[("Postgres-PITR<br/>backups")]
+      PG[("SQLite default /<br/>Postgres prod<br/>metadata · ACL · audit")]
+      PITR[("Postgres-PITR<br/>backups · Railway-managed")]
       QD[("Qdrant<br/>dense + BM25 sparse<br/>qdrant-volume")]
     end
     RR["FastEmbed cross-encoder<br/>(in-process, ONNX)"]
@@ -98,8 +105,10 @@ flowchart TB
 
   OAI["OpenAI<br/>fact-extraction (gpt-4o-mini)<br/>embeddings (text-embedding-3-small)"]
 
-  C1 --> MW --> API
-  C2 --> MW
+  B1 -->|"same-origin /api/*"| UIP
+  UIP -->|"+CF service token"| CF
+  C1 -->|"+CF service token"| CF
+  CF --> MW --> API
   API --> PG
   PG -. WAL .-> PITR
   API --> QD
@@ -110,18 +119,19 @@ flowchart TB
   classDef ext fill:#2a230f,stroke:#5e4d1f,color:#f5c451;
   classDef self fill:#0f2a20,stroke:#1f5e44,color:#3ecf8e;
   classDef svc fill:#161b27,stroke:#2a3346,color:#e6e9f0;
-  class OAI ext; class PG,QD,PITR,RR,CACHE self; class API,MW,C1,C2 svc;
+  classDef edge fill:#2a230f,stroke:#f5c451,color:#f5c451;
+  class OAI ext; class PG,QD,PITR,RR,CACHE self; class API,MW,C1,B1,UIP svc; class CF edge;
 </pre>
 </div>
 <div class="legend">
   <span><span class="dot" style="background:var(--green)"></span>self-hosted on Railway</span>
-  <span><span class="dot" style="background:var(--amber)"></span>external dependency</span>
-  <span><span class="dot" style="background:var(--accent)"></span>app / middleware</span>
+  <span><span class="dot" style="background:var(--amber)"></span>external dependency / Cloudflare Access edge</span>
+  <span><span class="dot" style="background:var(--accent)"></span>app / middleware / UI proxy</span>
 </div>
 
 <!-- ============================ WRITE PATH ============================ -->
 <h2>2 · Write path — <code>add_memories(text)</code></h2>
-<p class="muted">The only place an LLM does real reasoning: mem0 extracts atomic facts, deduplicates, embeds, and upserts. DB writes + categorization happen <b>after</b> the vector write; categorization is pushed off the request path.</p>
+<p class="muted">The only place an LLM does real reasoning: mem0 extracts atomic facts, embeds them (batch), deduplicates (MD5), and upserts. DB writes + categorization happen <b>after</b> the vector write; categorization is pushed off the request path. Each memory's Qdrant payload carries <code>source_app="openmemory"</code> + <code>mcp_client</code>. Passing <code>infer=False</code> stores text verbatim — no LLM extraction or dedup.</p>
 <div class="diagram">
 <pre class="mermaid">
 sequenceDiagram
@@ -139,11 +149,11 @@ sequenceDiagram
   Cl->>API: add_memories(text, infer)
   API->>P: get_user_and_app · app.is_active?
   API->>M: memory_client.add(text, user_id)
-  M->>L: extract facts (≈8.4k-token prompt)
+  M->>L: extract facts (≈8.4k base prompt + injected context)
   L-->>M: [{memory, ...}]  (JSON)
-  M->>M: dedup (MD5, in Python)
-  M->>E: embed new facts
-  M->>Q: upsert dense + BM25 sparse (+ payload)
+  M->>E: embed extracted facts (batch · Phase 3)
+  M->>M: dedup (MD5, in Python · Phase 5)
+  M->>Q: upsert dense + BM25 sparse* (+ payload)
   M-->>API: {results:[ADD/DELETE...]}
   API->>P: upsert Memory rows + MemoryStatusHistory · commit
   API->>BG: schedule_categorization (after commit)
@@ -154,6 +164,7 @@ sequenceDiagram
 </pre>
 </div>
 <div class="note ok"><b>Fixed this session:</b> categorization no longer blocks the write (was a synchronous LLM call inside the SQLAlchemy flush, and re-fired on every state change). It now runs in a post-commit threadpool — <code>categorization.schedule_categorization()</code>.</div>
+<div class="note warn"><b>Caveats (code-verified):</b> (a) BM25 sparse is written only when the collection has a <code>bm25</code> slot; older 1536-dim collections silently get dense-only. (b) The Postgres commit + categorization run inside the <code>if 'results' in response</code> block, but <code>cache.invalidate(user_id)</code> sits <b>outside</b> it — on a malformed/empty add response the cache is still invalidated though nothing was committed.</div>
 
 <!-- ============================ READ PATH ============================ -->
 <h2>3 · Read path — <code>search_memory(query)</code> · the RAG/CAG pipeline</h2>
@@ -201,7 +212,7 @@ flowchart TB
 <h3>What each stage does</h3>
 <ol class="steps">
   <li><b>ACL resolve (once)</b> <span class="f">acl.resolve_accessible_ids</span> — one Postgres lookup. <code>None</code>=all, <code>set()</code>=none (paused app / global deny → early return), <code>{ids}</code>=scoped. Replaces the old per-memory N+1.</li>
-  <li><b>CAG cache</b> <span class="f">cache.get_search_cache</span> — exact (normalized) + optional embedding-similarity match. Stores the <i>raw</i> user-scoped pool only; invalidated on add/delete. Avoids the cross-region embed + Qdrant round-trips on repeat queries.</li>
+  <li><b>CAG cache</b> <span class="f">cache.get_search_cache</span> — <b>exact normalized-query match only</b> on the read path (lowercase + whitespace-collapse). An embedding-similarity fallback exists in the class but is currently unreachable: <code>search_memory</code> calls <code>cache.get</code> without the query embedding (the embedding is stored on <code>set</code> but never read). Stores the <i>raw</i> user-scoped pool; invalidated on add/update/delete. Avoids the embed + Qdrant round-trips on repeat queries.</li>
   <li><b>Dense retrieval</b> <span class="f">vector_store.search</span> — semantic kNN in Qdrant, filtered by payload <code>user_id</code>.</li>
   <li><b>Sparse retrieval</b> <span class="f">vector_store.keyword_search</span> — BM25 over the lemmatized query (matches the lemmatized index). Degrades to dense-only if the collection lacks the bm25 slot.</li>
   <li><b>RRF fusion</b> <span class="f">retrieval.reciprocal_rank_fusion</span> — rank-based merge (k=60); no score-scale normalization needed between cosine and BM25.</li>
@@ -217,11 +228,11 @@ flowchart TB
 <div class="grid g3">
   <div class="card"><h4>What's cached</h4><p class="muted">The <b>raw</b> user-scoped candidate pool (post-rerank, pre-policy). Identical across a user's apps because Qdrant is filtered only by <code>user_id</code>.</p></div>
   <div class="card"><h4>Why it's safe</h4><p class="muted">State + ACL are re-applied <b>live</b> after every cache read. A memory paused/revoked after caching can never surface. No cross-app leak.</p></div>
-  <div class="card"><h4>Invalidation</h4><p class="muted">Only on <b>vector-set</b> change (add / delete / delete-all). Pause/archive need no invalidation — handled by the live state filter.</p></div>
+  <div class="card"><h4>Invalidation</h4><p class="muted">On <b>add / delete / delete-all</b> and on the REST <b>content update (PUT)</b> — even though that PUT only touches Postgres, not the vector set. Pause/archive need no invalidation — handled by the live state filter.</p></div>
 </div>
 <div class="grid g2" style="margin-top:16px">
-  <div class="card"><h4>Backend — default</h4><p class="muted">In-process LRU + TTL, per uvicorn worker. Zero infra. <span class="k">OPENMEMORY_CACHE_TTL · _MAX_ENTRIES · _SIM_THRESHOLD</span></p></div>
-  <div class="card"><h4>Backend — shared</h4><p class="muted">Set <code>OPENMEMORY_REDIS_URL</code> → shared across all 4 workers, survives restarts. Use <code>rediss://</code> for TLS. (Dedicated var — not <code>REDIS_URL</code>, which selects a Redis vector store.)</p></div>
+  <div class="card"><h4>Backend — default</h4><p class="muted">In-process LRU + TTL, per uvicorn worker. Zero infra. <span class="k">OPENMEMORY_CACHE_TTL · OPENMEMORY_CACHE_MAX_ENTRIES · OPENMEMORY_CACHE_SIM_THRESHOLD · OPENMEMORY_CACHE_ENABLED</span></p></div>
+  <div class="card"><h4>Backend — shared</h4><p class="muted">Set <code>OPENMEMORY_REDIS_URL</code> → shared across all workers, survives restarts (<code>rediss://</code> enables TLS via redis-py; Redis lookups are exact-key only). Dedicated var — not <code>REDIS_URL</code>, which selects a Redis vector store.</p></div>
 </div>
 
 <!-- ============================ DATA MODEL ============================ -->
@@ -234,11 +245,13 @@ flowchart TB
       <tr><td><code>users</code> / <code>apps</code></td><td>identities + per-client app, ownership</td></tr>
       <tr><td><code>memories</code></td><td>id, content, <b>state</b> (active/paused/archived/deleted), timestamps. Id == Qdrant point id</td></tr>
       <tr><td><code>categories</code> / <code>memory_categories</code></td><td>auto-categorization (async)</td></tr>
-      <tr><td><code>access_controls</code></td><td>app→memory allow/deny (ACL)</td></tr>
+      <tr><td><code>access_controls</code></td><td>generic polymorphic <code>subject→object</code> policy (free-form <code>effect</code> allow/deny, no FKs); app→memory is one usage pattern</td></tr>
+      <tr><td><code>archive_policies</code></td><td>criteria_type · criteria_id · days_to_archive</td></tr>
       <tr><td><code>memory_status_history</code></td><td>state-change audit</td></tr>
-      <tr><td><code>memory_access_logs</code></td><td>every search/list/delete</td></tr>
+      <tr><td><code>memory_access_logs</code></td><td>every search / list / delete / delete_all (free-form <code>access_type</code>, no enum)</td></tr>
       <tr><td><code>configs</code></td><td>runtime mem0 config override (key=main)</td></tr>
     </table>
+    <p class="muted" style="margin-top:6px"><b>10 tables</b> total (9 models + 1 association). State lives only here — see the live state filter (read-path stage 7).</p>
   </div>
   <div class="card">
     <h4>Qdrant — vectors only</h4>
@@ -250,18 +263,47 @@ flowchart TB
       <tr><td>payload.data</td><td>memory text</td></tr>
       <tr><td>payload.user_id</td><td>filter key (string)</td></tr>
       <tr><td>payload.hash</td><td>MD5 (dedup)</td></tr>
-      <tr><td>payload.text_lemmatized</td><td>BM25 index source</td></tr>
+      <tr><td>payload.text_lemmatized</td><td>BM25 index source — written by <code>reembed.py</code> only; the live write path lemmatizes the <i>query</i> at search time</td></tr>
     </table>
     <p class="muted" style="margin-top:6px"><b>State lives only in Postgres</b> — Qdrant has no knowledge of it, which is exactly why the live state filter (stage 7) exists.</p>
   </div>
 </div>
 
 <!-- ============================ SECURITY ============================ -->
-<h2>6 · Security layers</h2>
+<h2>6 · Security &amp; edge (Cloudflare Access)</h2>
 <div class="grid g3">
-  <div class="card"><h4>API-key auth <span class="pill new">opt-in</span></h4><p class="muted">Constant-time check on <code>/mcp</code>+<code>/api/</code> when <code>OPENMEMORY_API_KEY</code> is set (Bearer or <code>X-API-Key</code>). Off by default to not break clients — <b>enable on the public endpoint</b>.</p></div>
-  <div class="card"><h4>CORS</h4><p class="muted">Env-driven <code>OPENMEMORY_CORS_ORIGINS</code>; credentials auto-disabled for <code>*</code> (the unsafe combo). Registered inside the auth layer so 401s still carry CORS headers.</p></div>
-  <div class="card"><h4>Network + data</h4><p class="muted">Railway private networking between API↔Postgres↔Qdrant. Postgres-PITR backups. Redis via <code>rediss://</code>. No secrets logged.</p></div>
+  <div class="card"><h4>Cloudflare Access <span class="pill ext">edge</span></h4><p class="muted">The public hostname <code>mem0-mcp.trybabble.io</code> sits behind a Cloudflare Access zero-trust gateway. Machine clients authenticate with a <b>service token</b> (<code>CF-Access-Client-Id</code> / <code>CF-Access-Client-Secret</code>) against a <b>Service Auth</b> policy (not "Allow"). A rejected/expired token gets a cross-origin 302 to the IdP login.</p></div>
+  <div class="card"><h4>API-key auth <span class="pill new">opt-in</span></h4><p class="muted">App-layer defense-in-depth behind CF. Constant-time <code>hmac.compare_digest</code> on <code>/mcp</code>+<code>/api/</code> when <code>OPENMEMORY_API_KEY</code> is set (<code>X-API-Key</code> or Bearer). <code>OPTIONS</code> is exempt so CORS preflight passes. Off by default — <b>enable on the public endpoint</b>.</p></div>
+  <div class="card"><h4>CORS</h4><p class="muted">Env-driven <code>OPENMEMORY_CORS_ORIGINS</code> (default <code>*</code>). Credentials auto-disabled only for exactly <code>["*"]</code>; <b>any explicit allowlist auto-enables them</b>. CORS is the <b>outermost</b> middleware (wraps auth), so 401s still carry CORS headers.</p></div>
+</div>
+<h3>UI → API proxy — keeps the CF service token server-side</h3>
+<p class="muted">The dashboard browser never sees the API origin or the CF token. It calls the UI's <b>own</b> origin (relative <code>/api/*</code>); a Next.js server-side proxy (<code>ui/app/api/[...path]/route.ts</code>) injects the CF service-token headers and forwards to <code>OPENMEMORY_API_ORIGIN</code>. Same-origin from the browser ⇒ no CORS, no cross-domain CF cookie problems, and the secret stays on the server.</p>
+<div class="diagram">
+<pre class="mermaid">
+sequenceDiagram
+  autonumber
+  participant B as Browser (dashboard)
+  participant U as Next.js proxy (route.ts)
+  participant CF as Cloudflare Access
+  participant API as openmemory-mcp (FastAPI)
+  B->>U: GET /api/v1/... (same-origin, no secret)
+  U->>U: inject CF-Access-Client-Id / -Secret
+  U->>CF: forward to OPENMEMORY_API_ORIGIN (+ token)
+  alt token valid
+    CF->>API: pass through
+    API-->>U: 200 JSON (or same-origin 307 trailing-slash)
+    U->>U: follow same-origin 307, re-attach CF headers
+    U-->>B: 200 JSON
+  else token rejected / expired
+    CF-->>U: 302 cross-origin → IdP login
+    U-->>B: 502 JSON "Cloudflare Access rejected" (never relays login HTML)
+  end
+</pre>
+</div>
+<div class="note"><b>Why the manual redirect handling:</b> undici strips the <code>CF-Access-*</code> headers on a cross-origin hop. The proxy follows <i>same-origin</i> 307s (FastAPI trailing-slash) re-attaching the token, but a <i>cross-origin</i> 302 means CF rejected the token — it returns a clear 502 JSON instead of silently relaying the login page as a 200. The UI hooks call <b>relative</b> URLs (not <code>NEXT_PUBLIC_API_URL</code>) to defeat build-time env freezing. Alternative: point <code>OPENMEMORY_API_ORIGIN</code> at the Railway private host (<code>http://openmemory-mcp.railway.internal:8765</code>) to bypass Cloudflare entirely — then no token is needed.</div>
+<div class="grid g2" style="margin-top:16px">
+  <div class="card"><h4>Network + data</h4><p class="muted">Railway private networking between API↔relational DB↔Qdrant. Postgres-PITR is Railway-managed (not provisioned in-repo). Redis via <code>rediss://</code>. No secrets logged.</p></div>
+  <div class="card"><h4>Secrets (UI service)</h4><p class="muted"><code>OPENMEMORY_API_ORIGIN</code>, <code>CF_ACCESS_CLIENT_ID</code>, <code>CF_ACCESS_CLIENT_SECRET</code> — all server-side only, never <code>NEXT_PUBLIC_*</code> (those are frozen into the client bundle at build time).</p></div>
 </div>
 
 <!-- ============================ SELF-HOST MATRIX ============================ -->
@@ -269,7 +311,7 @@ flowchart TB
 <table>
   <tr><th>Component</th><th>Today</th><th>Decision</th><th>Why</th></tr>
   <tr><td>Vector store</td><td class="tag">Qdrant (Railway)</td><td><span class="pill self">self-hosted ✓</span></td><td>co-located, owns hybrid dense+BM25</td></tr>
-  <tr><td>Metadata / ACL / audit</td><td class="tag">Postgres (Railway)</td><td><span class="pill self">self-hosted ✓</span></td><td>source of truth + PITR backups</td></tr>
+  <tr><td>Metadata / ACL / audit</td><td class="tag">SQLite (default) → Postgres (prod)</td><td><span class="pill self">self-hosted ✓</span></td><td>source of truth; PITR is Railway-managed</td></tr>
   <tr><td>Reranker</td><td class="tag">FastEmbed ONNX cross-encoder</td><td><span class="pill self">self-hosted ✓</span></td><td>CPU-cheap, no torch; biggest precision lever</td></tr>
   <tr><td>Search cache</td><td class="tag">in-proc / Redis</td><td><span class="pill self">self-hosted ✓</span></td><td>latency + cost; Redis optional</td></tr>
   <tr><td>Embeddings</td><td class="tag">OpenAI text-embedding-3-small (1536)</td><td><span class="pill new">→ arctic-embed-m (768)</span></td><td><b>more accurate</b> (+3.8 MTEB) &amp; fast on CPU; re-embed migration</td></tr>
@@ -278,9 +320,9 @@ flowchart TB
 </table>
 
 <div class="note warn"><b>The LLM is the one piece that can't go fully self-hosted on CPU-only Railway.</b>
-mem0's <code>add()</code> is a single synchronous call carrying an ~8.4k-token prompt → <b>prefill-bound</b>.
-Accuracy parity with gpt-4o-mini needs a <b>14B</b> model (Qwen2.5-14B, IFEval 81.0 ≈ gpt-4o-mini 80.4); a 7B underperforms and risks silent memory loss on malformed JSON.
-A 14B on CPU ≈ <b>~6 min / write</b>; Railway has no GPU. Full self-host requires a <b>GPU sidecar</b> (Qwen2.5-14B-AWQ on vLLM, ~$600–800/mo or serverless) → ~1.7–4.6s/write. <b>Chosen: keep gpt-4o-mini</b> for reasoning until/unless a GPU host is added.</div>
+mem0's <code>add()</code> is a single synchronous call whose <b>base system prompt</b> (<code>ADDITIVE_EXTRACTION_PROMPT</code>, ~8.4k tokens) is sent on every write, plus injected context (existing memories + recent messages) → ~8.4k+ tokens, <b>prefill-bound</b>. A malformed-JSON response silently yields zero memories (code-verified).
+Accuracy parity with gpt-4o-mini needs a <b>14B</b> model (Qwen2.5-14B); a 7B underperforms.
+<b>The figures that follow are external estimates, not measured in this repo:</b> IFEval 81.0 ≈ gpt-4o-mini 80.4; a 14B on CPU ≈ ~6 min/write (Railway has no GPU); a <b>GPU sidecar</b> (Qwen2.5-14B-AWQ on vLLM, ~$600–800/mo or serverless) → ~1.7–4.6s/write. <b>Chosen: keep gpt-4o-mini</b> for reasoning until/unless a GPU host is added.</div>
 
 <!-- ============================ MIGRATION ============================ -->
 <h2>8 · Planned migration — embeddings → arctic-embed-m (zero-downtime)</h2>
@@ -292,7 +334,7 @@ flowchart LR
   end
   subgraph MIG[" one-time re-embed "]
     direction TB
-    S1["scripts/reembed.py"] --> S2["read active memories<br/>(Postgres = source of truth)"]
+    S1["scripts/reembed.py"] --> S2["read ALL non-deleted memories<br/>active + paused + archived<br/>(Postgres = source of truth)"]
     S2 --> S3["embed w/ arctic-embed-m"]
     S3 --> S4[("Qdrant: openmemory_arctic_m_768<br/>768-dim + BM25 slot")]
   end
@@ -311,7 +353,7 @@ flowchart LR
   <li><b>Re-embed</b> <span class="f">python -m scripts.reembed --dry-run</span> then without the flag. Idempotent; preserves memory ids; writes BM25 → <b>activates hybrid</b>.</li>
   <li><b>Cut over</b> — point the app at the new collection, redeploy, verify counts, delete the old 1536-dim collection.</li>
 </ol>
-<div class="note"><b>Why a new collection?</b> Vectors are not cross-model compatible and the dim changes (1536→768). The code fix this session makes <code>embedding_model_dims</code> env-driven — without it mem0 defaulted to 1536 and every 768-dim upsert would have failed.</div>
+<div class="note"><b>Why a new collection?</b> Vectors are not cross-model compatible and the dim changes (1536→768). The code fix this session makes <code>embedding_model_dims</code> env-driven <b>for the Qdrant branches</b> (Milvus / Elasticsearch / Faiss still hard-code 1536) — without it mem0 defaulted to 1536 and every 768-dim upsert would have failed. Note: <code>EMBEDDER_PROVIDER</code> defaults are coupled to <code>LLM_PROVIDER</code> (an Ollama LLM silently selects 768-dim <code>nomic-embed-text</code>), so set <code>EMBEDDING_DIMS</code> explicitly.</div>
 
 <!-- ============================ ENV ============================ -->
 <h2>9 · Environment reference</h2>
@@ -330,6 +372,8 @@ flowchart LR
   <div class="card"><h4>Cache</h4>
     <p class="k">OPENMEMORY_REDIS_URL=rediss://… <span class="muted">(optional, shared)</span><br/>
     OPENMEMORY_CACHE_TTL=300<br/>
+    OPENMEMORY_CACHE_MAX_ENTRIES=1024<br/>
+    OPENMEMORY_CACHE_SIM_THRESHOLD=0.97<br/>
     OPENMEMORY_CACHE_ENABLED=true</p></div>
   <div class="card"><h4>Security / LLM</h4>
     <p class="k">OPENMEMORY_API_KEY=… <span class="muted">(enable!)</span><br/>
@@ -337,13 +381,18 @@ flowchart LR
     LLM_PROVIDER=openai · LLM_MODEL=gpt-4o-mini<br/>
     OPENMEMORY_DISABLE_CATEGORIZATION=false<br/>
     DB_POOL_SIZE · DB_MAX_OVERFLOW · DB_POOL_RECYCLE</p></div>
+  <div class="card"><h4>UI service (Cloudflare proxy)</h4>
+    <p class="k">OPENMEMORY_API_ORIGIN=https://mem0-mcp.trybabble.io<br/>
+    <span class="muted"># or http://openmemory-mcp.railway.internal:8765 (no CF)</span><br/>
+    CF_ACCESS_CLIENT_ID=… <span class="muted">(server-side)</span><br/>
+    CF_ACCESS_CLIENT_SECRET=… <span class="muted">(server-side)</span></p></div>
 </div>
 
 <footer>
   Generated for the openmemory self-hosted deployment · diagrams render via Mermaid (needs network on first load).
-  Source of truth = the code under <code>openmemory/api/app/</code>. Files referenced:
-  <code>mcp_server.py</code>, <code>utils/retrieval.py</code>, <code>utils/reranker.py</code>, <code>utils/acl.py</code>,
-  <code>utils/cache.py</code>, <code>utils/categorization.py</code>, <code>utils/memory.py</code>, <code>scripts/reembed.py</code>.
+  Source of truth = the code under <code>openmemory/api/app/</code> and <code>openmemory/ui/</code>. Files referenced:
+  <code>main.py</code>, <code>database.py</code>, <code>models.py</code>, <code>mcp_server.py</code>, <code>utils/retrieval.py</code>, <code>utils/reranker.py</code>, <code>utils/acl.py</code>,
+  <code>utils/cache.py</code>, <code>utils/categorization.py</code>, <code>utils/memory.py</code>, <code>scripts/reembed.py</code>, <code>ui/app/api/[...path]/route.ts</code>.
 </footer>
 
 </div>
