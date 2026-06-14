@@ -104,7 +104,12 @@ export const useMemoriesApi = (): UseMemoriesApiReturn => {
   const memories = useSelector((state: RootState) => state.memories.memories);
   const selectedMemory = useSelector((state: RootState) => state.memories.selectedMemory);
 
-  const URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8765";
+  // All API traffic flows through the same-origin Next proxy at /api/[...path].
+  // Using a relative base ("") keeps every request same-origin (no CORS, no CF
+  // cross-domain cookie bounce) and removes the build-time NEXT_PUBLIC_API_URL
+  // inlining + entrypoint-sed substitution as a point of failure. An override is
+  // still honoured if NEXT_PUBLIC_API_URL is explicitly set to a real origin.
+  const URL = process.env.NEXT_PUBLIC_API_URL || "";
 
   const fetchMemories = useCallback(async (
     query?: string,

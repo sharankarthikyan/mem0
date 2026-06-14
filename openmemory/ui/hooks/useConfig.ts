@@ -30,14 +30,15 @@ export const useConfig = (): UseConfigApiReturn => {
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
   const dispatch = useDispatch<AppDispatch>();
-  const URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8765";
-  
+  // Same-origin proxy base (see useMemoriesApi.ts). "" => relative /api/... URLs.
+  const URL = process.env.NEXT_PUBLIC_API_URL || "";
+
   const fetchConfig = async () => {
     setIsLoading(true);
     dispatch(setConfigLoading());
     
     try {
-      const response = await axios.get(`${URL}/api/v1/config`);
+      const response = await axios.get(`${URL}/api/v1/config/`);
       dispatch(setConfigSuccess(response.data));
       setIsLoading(false);
     } catch (err: any) {
@@ -54,7 +55,7 @@ export const useConfig = (): UseConfigApiReturn => {
     setError(null);
     
     try {
-      const response = await axios.put(`${URL}/api/v1/config`, config);
+      const response = await axios.put(`${URL}/api/v1/config/`, config);
       dispatch(setConfigSuccess(response.data));
       setIsLoading(false);
       return response.data;

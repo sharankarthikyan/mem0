@@ -67,7 +67,8 @@ export const useAppsApi = (): UseAppsApiReturn => {
   const dispatch = useDispatch<AppDispatch>();
   const user_id = useSelector((state: RootState) => state.profile.userId);
 
-  const URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8765";
+  // Same-origin proxy base (see useMemoriesApi.ts). "" => relative /api/... URLs.
+  const URL = process.env.NEXT_PUBLIC_API_URL || "";
 
   const fetchApps = useCallback(async (params: FetchAppsParams = {}): Promise<{ apps: App[], total: number }> => {
     const {
