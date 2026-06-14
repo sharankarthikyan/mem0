@@ -67,14 +67,19 @@ def reembed(batch_log: int = 100, dry_run: bool = False) -> None:
 
     db = SessionLocal()
     try:
+        # Re-embed ALL non-deleted memories (active + paused + archived). The old
+        # collection holds vectors for all of these — pause/archive only change
+        # Postgres state and never remove the vector; only delete removes it. The
+        # live active-state filter still hides non-active rows from search, but
+        # migrating them preserves restorability (un-pause/un-archive keeps working).
         rows = (
             db.query(Memory, User.user_id)
             .join(User, Memory.user_id == User.id)
-            .filter(Memory.state == MemoryState.active)
+            .filter(Memory.state != MemoryState.deleted)
             .all()
         )
         total = len(rows)
-        print(f"Active memories to re-embed: {total}")
+        print(f"Memories to re-embed (active + paused + archived): {total}")
         if dry_run:
             print("--dry-run: no writes performed.")
             return

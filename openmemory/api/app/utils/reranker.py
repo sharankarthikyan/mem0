@@ -55,7 +55,12 @@ class FastEmbedReranker:
                 if self._encoder is None:
                     from fastembed.rerank.cross_encoder import TextCrossEncoder
 
-                    self._encoder = TextCrossEncoder(model_name=self.model_name)
+                    # Persist the ONNX model across cold starts by pointing at a
+                    # mounted volume (FASTEMBED_CACHE_DIR). fastembed has no env
+                    # var for this, so we pass it explicitly.
+                    cache_dir = os.environ.get("FASTEMBED_CACHE_DIR")
+                    kwargs = {"cache_dir": cache_dir} if cache_dir else {}
+                    self._encoder = TextCrossEncoder(model_name=self.model_name, **kwargs)
         return self._encoder
 
     def rerank(self, query: str, documents: List[Dict[str, Any]], top_k: Optional[int] = None) -> List[Dict[str, Any]]:
