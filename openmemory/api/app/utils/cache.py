@@ -11,8 +11,10 @@ Two backends, selected automatically:
 - In-process (default): an LRU + TTL dict, plus optional embedding-similarity
   matching so semantically-equivalent queries ("my email?" vs "what's my email")
   share a cache entry. Zero infra. Per-worker (each uvicorn worker keeps its own).
-- Redis (when ``REDIS_URL`` is set): shared across all workers and survives
-  restarts. Exact-match only — a cross-key similarity scan in Redis is too costly.
+- Redis (when ``OPENMEMORY_REDIS_URL`` is set): shared across all workers and
+  survives restarts. Exact-match only — a cross-key similarity scan in Redis is
+  too costly. (Dedicated var, NOT ``REDIS_URL`` — that name is also a vector-store
+  selector in memory.py, so reusing it could silently switch the vector backend.)
 
 The cache is keyed by ``(user_id, normalized_query)`` and invalidated per-user on
 any write (add/update/delete), so it can never serve stale memories.
@@ -164,7 +166,7 @@ class RedisSearchCache(BaseSearchCache):
     """
 
     def __init__(self, redis_url: str, ttl_seconds: int = _DEFAULT_TTL_SECONDS):
-        import redis  # imported lazily so redis is only required when REDIS_URL is set
+        import redis  # imported lazily so redis is only required when OPENMEMORY_REDIS_URL is set
 
         self._client = redis.Redis.from_url(redis_url, decode_responses=True)
         self._ttl = ttl_seconds
@@ -227,7 +229,7 @@ def get_search_cache() -> Optional[BaseSearchCache]:
     with _cache_lock:
         if _cache_instance is not None:
             return _cache_instance
-        redis_url = os.environ.get("REDIS_URL")
+        redis_url = os.environ.get("OPENMEMORY_REDIS_URL")
         if redis_url:
             try:
                 _cache_instance = RedisSearchCache(redis_url)
