@@ -1,6 +1,7 @@
 services:
   mem0_store:
-    image: qdrant/qdrant
+    # Pin the pulled image so a recreate cannot silently change the Qdrant version.
+    image: qdrant/qdrant:v1.18.2
     ports:
       - "6333:6333"
     volumes:
@@ -12,7 +13,9 @@ services:
     build: api/
     environment:
       - USER
-      - API_KEY
+      # The app reads OPENMEMORY_API_KEY (api/main.py); the old `API_KEY` passthrough
+      # was a dead env var, so setting it never enabled the optional auth gate.
+      - OPENMEMORY_API_KEY
     env_file:
       - api/.env
     depends_on:

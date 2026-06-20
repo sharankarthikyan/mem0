@@ -1,13 +1,14 @@
 from datetime import UTC, datetime
-import io 
-import json 
-import gzip 
+import io
+import json
+import gzip
+import logging
 import zipfile
 from typing import Optional, List, Dict, Any
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Query, Form
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, JSONResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import and_
@@ -304,113 +305,163 @@ async def import_backup(
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid zip file")
 
-    default_app = db.query(App).filter(App.owner_id == user.id, App.name == "openmemory").first()
-    if not default_app: 
-        default_app = App(owner_id=user.id, name="openmemory", is_active=True, metadata_={})
-        db.add(default_app)
-        db.commit()
-        db.refresh(default_app)
+    # ---- Database phase: one atomic transaction -------------------------------
+    # Previously every row was committed individually with no rollback, so any
+    # mid-stream failure left a half-imported database. Stage everything with
+    # flush() and commit ONCE at the end; on any error, roll the whole thing back.
 
-    cat_id_map: Dict[str, UUID] = {}
-    for c in sqlite_data.get("categories", []): 
-        cat = db.query(Category).filter(Category.name == c["name"]).first()
-        if not cat: 
-            cat = Category(name=c["name"], description=c.get("description"))
-            db.add(cat)
-            db.commit()
-            db.refresh(cat)
-        cat_id_map[c["id"]] = cat.id
-
-    old_to_new_id: Dict[str, UUID] = {}
-    for m in sqlite_data.get("memories", []): 
-        incoming_id = UUID(m["id"])
-        existing = db.query(Memory).filter(Memory.id == incoming_id).first()
-
-        # Cross-user collision: always mint a new UUID and import as a new memory
-        if existing and existing.user_id != user.id:
-            target_id = uuid4()
-        else:
-            target_id = incoming_id
-
-        old_to_new_id[m["id"]] = target_id
-
-        # Same-user collision + skip mode: leave existing row untouched
-        if existing and (existing.user_id == user.id) and mode == "skip": 
-            continue 
-        
-        # Same-user collision + overwrite mode: treat import as ground truth
-        if existing and (existing.user_id == user.id) and mode == "overwrite": 
-            incoming_state = m.get("state", "active")
-            existing.user_id = user.id 
-            existing.app_id = default_app.id
-            existing.content = m.get("content") or ""
-            existing.metadata_ = m.get("metadata") or {}
-            try: 
-                existing.state = MemoryState(incoming_state)
-            except Exception: 
-                existing.state = MemoryState.active
-            # Update state-related timestamps from import (ground truth)
-            existing.archived_at = _parse_iso(m.get("archived_at"))
-            existing.deleted_at = _parse_iso(m.get("deleted_at"))
-            existing.created_at = _parse_iso(m.get("created_at")) or existing.created_at
-            existing.updated_at = _parse_iso(m.get("updated_at")) or existing.updated_at
-            db.add(existing)
-            db.commit()
-            continue
-
-        new_mem = Memory(
-            id=target_id,
-            user_id=user.id,
-            app_id=default_app.id,
-            content=m.get("content") or "",
-            metadata_=m.get("metadata") or {},
-            state=MemoryState(m.get("state", "active")) if m.get("state") else MemoryState.active,
-            created_at=_parse_iso(m.get("created_at")) or datetime.now(UTC),
-            updated_at=_parse_iso(m.get("updated_at")) or datetime.now(UTC),
-            archived_at=_parse_iso(m.get("archived_at")),
-            deleted_at=_parse_iso(m.get("deleted_at")),
-        )
-        db.add(new_mem)
-        db.commit()
-
-    for link in sqlite_data.get("memory_categories", []): 
-        mid = old_to_new_id.get(link["memory_id"])
-        cid = cat_id_map.get(link["category_id"])
-        if not (mid and cid): 
-            continue
-        exists = db.execute(
-            memory_categories.select().where(
-                (memory_categories.c.memory_id == mid) & (memory_categories.c.category_id == cid)
-            )
-        ).first()
-
-        if not exists: 
-            db.execute(memory_categories.insert().values(memory_id=mid, category_id=cid))
-            db.commit()
-
-    for h in sqlite_data.get("status_history", []): 
-        hid = UUID(h["id"])
-        mem_id = old_to_new_id.get(h["memory_id"], UUID(h["memory_id"]))
-        exists = db.query(MemoryStatusHistory).filter(MemoryStatusHistory.id == hid).first()
-        if exists and mode == "skip":
-            continue
-        rec = exists if exists else MemoryStatusHistory(id=hid)
-        rec.memory_id = mem_id
-        rec.changed_by = user.id
-        try:
-            rec.old_state = MemoryState(h.get("old_state", "active"))
-            rec.new_state = MemoryState(h.get("new_state", "active"))
-        except Exception:
-            rec.old_state = MemoryState.active
-            rec.new_state = MemoryState.active
-        rec.changed_at = _parse_iso(h.get("changed_at")) or datetime.now(UTC)
-        db.add(rec)
-        db.commit()
-
+    # Pre-validate the embedding dimension BEFORE mutating the database, so a
+    # backup embedded with a different model fails cleanly instead of leaving rows
+    # that have no corresponding (searchable) vector.
     memory_client = get_memory_client()
     vector_store = getattr(memory_client, "vector_store", None) if memory_client else None
+    has_embedder = bool(memory_client) and hasattr(memory_client, "embedding_model")
+    expected_dims = getattr(vector_store, "embedding_model_dims", None) if vector_store else None
+    if vector_store is not None and has_embedder and expected_dims:
+        sample = next(
+            (m for m in sqlite_data.get("memories", []) if (m.get("content") or "").strip()),
+            None,
+        )
+        if sample is not None:
+            try:
+                sample_vec = memory_client.embedding_model.embed(sample.get("content") or "", "add")
+            except Exception:
+                sample_vec = None
+            if sample_vec is not None and len(sample_vec) != expected_dims:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"Embedding dimension mismatch: backup content embeds to "
+                        f"{len(sample_vec)} dims but the configured vector store expects "
+                        f"{expected_dims}. No data was imported. Align the embedder / vector "
+                        f"store and retry."
+                    ),
+                )
 
-    if vector_store and memory_client and hasattr(memory_client, "embedding_model"):
+    try:
+        default_app = db.query(App).filter(App.owner_id == user.id, App.name == "openmemory").first()
+        if not default_app:
+            default_app = App(owner_id=user.id, name="openmemory", is_active=True, metadata_={})
+            db.add(default_app)
+            db.flush()  # assign default_app.id within the transaction (no commit)
+
+        cat_id_map: Dict[str, UUID] = {}
+        for c in sqlite_data.get("categories", []):
+            cat = db.query(Category).filter(Category.name == c["name"]).first()
+            if not cat:
+                cat = Category(name=c["name"], description=c.get("description"))
+                db.add(cat)
+                db.flush()  # make the new category queryable later in this txn
+            cat_id_map[c["id"]] = cat.id
+
+        old_to_new_id: Dict[str, UUID] = {}
+        for m in sqlite_data.get("memories", []):
+            incoming_id = UUID(m["id"])
+            existing = db.query(Memory).filter(Memory.id == incoming_id).first()
+
+            # Cross-user collision: always mint a new UUID and import as a new memory
+            if existing and existing.user_id != user.id:
+                target_id = uuid4()
+            else:
+                target_id = incoming_id
+
+            old_to_new_id[m["id"]] = target_id
+
+            # Same-user collision + skip mode: leave existing row untouched
+            if existing and (existing.user_id == user.id) and mode == "skip":
+                continue
+
+            # Same-user collision + overwrite mode: treat import as ground truth
+            if existing and (existing.user_id == user.id) and mode == "overwrite":
+                incoming_state = m.get("state", "active")
+                existing.app_id = default_app.id
+                existing.content = m.get("content") or ""
+                existing.metadata_ = m.get("metadata") or {}
+                try:
+                    existing.state = MemoryState(incoming_state)
+                except Exception:
+                    existing.state = MemoryState.active
+                # Update state-related timestamps from import (ground truth)
+                existing.archived_at = _parse_iso(m.get("archived_at"))
+                existing.deleted_at = _parse_iso(m.get("deleted_at"))
+                existing.created_at = _parse_iso(m.get("created_at")) or existing.created_at
+                existing.updated_at = _parse_iso(m.get("updated_at")) or existing.updated_at
+                db.add(existing)
+                continue
+
+            new_mem = Memory(
+                id=target_id,
+                user_id=user.id,
+                app_id=default_app.id,
+                content=m.get("content") or "",
+                metadata_=m.get("metadata") or {},
+                state=MemoryState(m.get("state", "active")) if m.get("state") else MemoryState.active,
+                created_at=_parse_iso(m.get("created_at")) or datetime.now(UTC),
+                updated_at=_parse_iso(m.get("updated_at")) or datetime.now(UTC),
+                archived_at=_parse_iso(m.get("archived_at")),
+                deleted_at=_parse_iso(m.get("deleted_at")),
+            )
+            db.add(new_mem)
+
+        # Flush memory rows so the FK targets below (memory_categories,
+        # status_history) resolve within the transaction.
+        db.flush()
+
+        for link in sqlite_data.get("memory_categories", []):
+            mid = old_to_new_id.get(link["memory_id"])
+            cid = cat_id_map.get(link["category_id"])
+            if not (mid and cid):
+                continue
+            exists = db.execute(
+                memory_categories.select().where(
+                    (memory_categories.c.memory_id == mid) & (memory_categories.c.category_id == cid)
+                )
+            ).first()
+            if not exists:
+                db.execute(memory_categories.insert().values(memory_id=mid, category_id=cid))
+
+        for h in sqlite_data.get("status_history", []):
+            hid = UUID(h["id"])
+            mem_id = old_to_new_id.get(h["memory_id"])
+            if mem_id is None:
+                # History for a memory that was not imported (e.g. skip mode) would
+                # violate the FK; drop it rather than abort the whole import.
+                continue
+            exists = db.query(MemoryStatusHistory).filter(MemoryStatusHistory.id == hid).first()
+            if exists and mode == "skip":
+                continue
+            rec = exists if exists else MemoryStatusHistory(id=hid)
+            rec.memory_id = mem_id
+            rec.changed_by = user.id
+            try:
+                rec.old_state = MemoryState(h.get("old_state", "active"))
+                rec.new_state = MemoryState(h.get("new_state", "active"))
+            except Exception:
+                rec.old_state = MemoryState.active
+                rec.new_state = MemoryState.active
+            rec.changed_at = _parse_iso(h.get("changed_at")) or datetime.now(UTC)
+            db.add(rec)
+
+        db.commit()
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception as e:
+        db.rollback()
+        logging.error(f"Backup import failed during the database phase; rolled back: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Import failed during the database phase; no changes were applied: {e}",
+        )
+
+    # ---- Vector phase: report per-record results honestly ---------------------
+    # The SQL rows are committed. Vectors live in a separate store, so TRACK and
+    # REPORT failures instead of swallowing them and claiming success.
+    vectors_written = 0
+    vectors_failed = 0
+    failed_ids: List[str] = []
+
+    if vector_store and has_embedder:
         def iter_logical_records():
             if memories_blob:
                 gz_buf = io.BytesIO(memories_blob)
@@ -455,13 +506,32 @@ async def import_backup(
             try:
                 vec = memory_client.embedding_model.embed(content, "add")
                 vector_store.insert(vectors=[vec], payloads=[payload], ids=[str(new_id)])
+                vectors_written += 1
             except Exception as e:
-                print(f"Vector upsert failed for memory {new_id}: {e}")
+                vectors_failed += 1
+                failed_ids.append(str(new_id))
+                logging.error(f"Vector upsert failed for memory {new_id}: {e}")
                 continue
 
-        return {"message": f'Import completed into user "{user_id}"'}
+    result: Dict[str, Any] = {
+        "message": f'Import completed into user "{user_id}"',
+        "memories_imported": len(old_to_new_id),
+        "vectors_written": vectors_written,
+        "vectors_failed": vectors_failed,
+    }
 
-    return {"message": f'Import completed into user "{user_id}"'}
+    if vectors_failed:
+        result["status"] = "partial"
+        result["failed_vector_ids"] = failed_ids
+        result["warning"] = (
+            f"{vectors_failed} memory vector(s) failed to import. Those memories exist in "
+            f"the database but are NOT searchable until re-embedded."
+        )
+        # 207 Multi-Status: DB import succeeded but some vectors did not.
+        return JSONResponse(status_code=207, content=result)
+
+    result["status"] = "ok"
+    return result
 
 
     

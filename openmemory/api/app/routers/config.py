@@ -147,9 +147,19 @@ async def update_configuration(config: ConfigSchema, db: Session = Depends(get_d
             updated_config["openmemory"] = {}
         updated_config["openmemory"].update(config.openmemory.dict(exclude_none=True))
     
-    # Update mem0 settings
-    updated_config["mem0"] = config.mem0.dict(exclude_none=True)
-    
+    # Update mem0 settings if provided (mem0 is Optional; guard against None so a
+    # partial payload cannot raise AttributeError -> 500).
+    if config.mem0 is not None:
+        updated_config["mem0"] = config.mem0.dict(exclude_none=True)
+
+    # Persist and re-initialize the memory client. Without this the handler fell
+    # off the end: it never saved, never reset the client, and (because of the
+    # ConfigSchema response_model) returned HTTP 200 `null` while the UI reported
+    # the save as successful.
+    save_config_to_db(db, updated_config)
+    reset_memory_client()
+    return updated_config
+
 
 @router.patch("/", response_model=ConfigSchema)
 async def patch_configuration(config_update: ConfigSchema, db: Session = Depends(get_db)):

@@ -210,19 +210,22 @@ async def create_memory(
     # Log what we're about to do
     logging.info(f"Creating memory for user_id: {request.user_id} with app: {request.app}")
     
-    # Try to get memory client safely
+    # Get the memory client. If it is unavailable the memory CANNOT be persisted,
+    # so fail loudly with a 503 instead of returning HTTP 200 with an {error} body
+    # (which clients checking response.ok would treat as a successful write).
     try:
         memory_client = get_memory_client()
         if not memory_client:
             raise Exception("Memory client is not available")
     except Exception as client_error:
-        logging.warning(f"Memory client unavailable: {client_error}. Creating memory in database only.")
-        # Return a json response with the error
-        return {
-            "error": str(client_error)
-        }
+        logging.error(f"Memory client unavailable: {client_error}. Memory was NOT persisted.")
+        raise HTTPException(
+            status_code=503,
+            detail=f"Memory store is unavailable; the memory was not saved: {client_error}",
+        )
 
-    # Try to save to Qdrant via memory_client
+    # Send to the vector store. A failure here means nothing was persisted, so
+    # surface a 502 rather than a 200/{error}.
     try:
         qdrant_response = memory_client.add(
             request.text,
@@ -233,73 +236,88 @@ async def create_memory(
             },
             infer=request.infer
         )
-        
-        # Log the response for debugging
         logging.info(f"Qdrant response: {qdrant_response}")
-        
-        # Process Qdrant response
-        if isinstance(qdrant_response, dict) and 'results' in qdrant_response:
-            created_memories = []
-            
-            for result in qdrant_response['results']:
-                if result['event'] == 'ADD':
-                    # Get the Qdrant-generated ID
-                    memory_id = UUID(result['id'])
-                    
-                    # Check if memory already exists
-                    existing_memory = db.query(Memory).filter(Memory.id == memory_id).first()
-                    
-                    if existing_memory:
-                        # Update existing memory
-                        existing_memory.state = MemoryState.active
-                        existing_memory.content = result['memory']
-                        memory = existing_memory
-                    else:
-                        # Create memory with the EXACT SAME ID from Qdrant
-                        memory = Memory(
-                            id=memory_id,  # Use the same ID that Qdrant generated
-                            user_id=user.id,
-                            app_id=app_obj.id,
-                            content=result['memory'],
-                            metadata_=request.metadata,
-                            state=MemoryState.active
-                        )
-                        db.add(memory)
-                    
-                    # Create history entry
-                    history = MemoryStatusHistory(
-                        memory_id=memory_id,
-                        changed_by=user.id,
-                        old_state=MemoryState.deleted if existing_memory else MemoryState.deleted,
-                        new_state=MemoryState.active
-                    )
-                    db.add(history)
-                    
-                    created_memories.append(memory)
-            
-            # Commit all changes at once
-            if created_memories:
-                db.commit()
-                for memory in created_memories:
-                    db.refresh(memory)
-
-                # Categorize off the request path (after commit) and drop the
-                # user's cached search results.
-                for memory in created_memories:
-                    schedule_categorization(memory.id, memory.content)
-                cache = get_search_cache()
-                if cache:
-                    cache.invalidate(request.user_id)
-
-                # Return the first memory (for API compatibility)
-                # but all memories are now saved to the database
-                return created_memories[0]
     except Exception as qdrant_error:
-        logging.warning(f"Qdrant operation failed: {qdrant_error}.")
-        # Return a json response with the error
-        return {
-            "error": str(qdrant_error)
-        }
+        logging.error(f"Memory store operation failed: {qdrant_error}. Memory was NOT persisted.")
+        raise HTTPException(
+            status_code=502,
+            detail=f"Memory store operation failed; the memory was not saved: {qdrant_error}",
+        )
+
+    # Process the vector-store response into local rows.
+    created_memories = []
+    if isinstance(qdrant_response, dict) and 'results' in qdrant_response:
+        for result in qdrant_response['results']:
+            if result.get('event') != 'ADD':
+                continue
+
+            # Reuse the vector-store-generated ID so the row and the vector match.
+            memory_id = UUID(result['id'])
+            existing_memory = db.query(Memory).filter(Memory.id == memory_id).first()
+
+            if existing_memory:
+                # Record the transition from the row's ACTUAL prior state, not a
+                # hard-coded value (the previous code set old_state to `deleted`
+                # for both branches, making the history entry meaningless).
+                prior_state = existing_memory.state
+                existing_memory.state = MemoryState.active
+                existing_memory.content = result['memory']
+                memory = existing_memory
+            else:
+                # No prior row: the memory transitions from "absent" (deleted).
+                prior_state = MemoryState.deleted
+                memory = Memory(
+                    id=memory_id,
+                    user_id=user.id,
+                    app_id=app_obj.id,
+                    content=result['memory'],
+                    metadata_=request.metadata,
+                    state=MemoryState.active
+                )
+                db.add(memory)
+
+            history = MemoryStatusHistory(
+                memory_id=memory_id,
+                changed_by=user.id,
+                old_state=prior_state,
+                new_state=MemoryState.active
+            )
+            db.add(history)
+            created_memories.append(memory)
+
+    # Persist the rows. A DB failure here must roll back and surface a 500, never
+    # fall through to an HTTP 200 null.
+    if created_memories:
+        try:
+            db.commit()
+            for memory in created_memories:
+                db.refresh(memory)
+        except Exception as db_error:
+            db.rollback()
+            logging.error(f"Failed to persist memory to database: {db_error}")
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to persist the memory to the database: {db_error}",
+            )
+
+        # Categorize off the request path (after commit) and drop the
+        # user's cached search results.
+        for memory in created_memories:
+            schedule_categorization(memory.id, memory.content)
+        cache = get_search_cache()
+        if cache:
+            cache.invalidate(request.user_id)
+
+        # Return the first memory (for API compatibility); all are saved.
+        return created_memories[0]
+
+    # No ADD event: the memory layer extracted no new memory from the input (e.g.
+    # a duplicate or no salient facts). This is a successful no-op — return an
+    # explicit body instead of falling through to an implicit HTTP 200 null.
+    return {
+        "results": qdrant_response.get("results", []) if isinstance(qdrant_response, dict) else [],
+        "message": "No new memory was created from the provided input.",
+    }
 
 
 

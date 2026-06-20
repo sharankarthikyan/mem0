@@ -1,4 +1,4 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useRef } from 'react';
 import axios from 'axios';
 import { Memory, Client, Category } from '@/components/types';
 import { useDispatch, useSelector } from 'react-redux';
@@ -103,6 +103,10 @@ export const useMemoriesApi = (): UseMemoriesApiReturn => {
   const user_id = useSelector((state: RootState) => state.profile.userId);
   const memories = useSelector((state: RootState) => state.memories.memories);
   const selectedMemory = useSelector((state: RootState) => state.memories.selectedMemory);
+  // Tracks the in-flight list request so a newer fetch (page/filter/search change)
+  // cancels the older one — otherwise a slow earlier response can resolve last and
+  // overwrite the list with stale rows.
+  const fetchMemoriesAbortRef = useRef<AbortController | null>(null);
 
   // All API traffic flows through the same-origin Next proxy at /api/[...path].
   // Using a relative base ("") keeps every request same-origin (no CORS, no CF
@@ -123,6 +127,11 @@ export const useMemoriesApi = (): UseMemoriesApiReturn => {
       showArchived?: boolean;
     }
   ): Promise<{ memories: Memory[], total: number, pages: number }> => {
+    // Cancel any list request still in flight before starting a new one.
+    fetchMemoriesAbortRef.current?.abort();
+    const controller = new AbortController();
+    fetchMemoriesAbortRef.current = controller;
+
     setIsLoading(true);
     setError(null);
     try {
@@ -138,7 +147,8 @@ export const useMemoriesApi = (): UseMemoriesApiReturn => {
           sort_column: filters?.sortColumn?.toLowerCase(),
           sort_direction: filters?.sortDirection,
           show_archived: filters?.showArchived
-        }
+        },
+        { signal: controller.signal }
       );
 
       const adaptedMemories: Memory[] = response.data.items.map((item: ApiMemoryItem) => ({
@@ -159,6 +169,14 @@ export const useMemoriesApi = (): UseMemoriesApiReturn => {
         pages: response.data.pages
       };
     } catch (err: any) {
+      // A superseded request was aborted by a newer one: swallow it and let the
+      // newer request own the shared loading/error state. Re-throw a tagged error
+      // so callers can ignore it too.
+      if (axios.isCancel(err) || err?.name === 'CanceledError' || err?.code === 'ERR_CANCELED') {
+        const aborted = new Error('aborted');
+        aborted.name = 'AbortError';
+        throw aborted;
+      }
       const errorMessage = err.message || 'Failed to fetch memories';
       setError(errorMessage);
       setIsLoading(false);

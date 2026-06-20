@@ -14,10 +14,21 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { useRouter, useSearchParams } from "next/navigation";
-import { debounce } from "lodash";
-import { useEffect, useRef } from "react";
+import debounce from "lodash/debounce";
+import { useEffect, useRef, useState } from "react";
 import FilterComponent from "./FilterComponent";
 import { clearFilters } from "@/store/filtersSlice";
+import { useToast } from "@/hooks/use-toast";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 
 export function MemoryFilters() {
   const dispatch = useDispatch();
@@ -28,15 +39,28 @@ export function MemoryFilters() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const activeFilters = useSelector((state: RootState) => state.filters.apps);
+  const { toast } = useToast();
+  const [confirmBulkDelete, setConfirmBulkDelete] = useState(false);
 
   const inputRef = useRef<HTMLInputElement>(null);
 
-  const handleDeleteSelected = async () => {
+  const handleConfirmDeleteSelected = async () => {
+    const count = selectedMemoryIds.length;
+    setConfirmBulkDelete(false);
     try {
       await deleteMemories(selectedMemoryIds);
       dispatch(clearSelection());
+      toast({
+        title: count === 1 ? "Memory deleted" : "Memories deleted",
+        description: `${count} ${count === 1 ? "memory" : "memories"} permanently deleted.`,
+      });
     } catch (error) {
       console.error("Failed to delete memories:", error);
+      toast({
+        title: "Error",
+        description: "Failed to delete memories",
+        variant: "destructive",
+      });
     }
   };
 
@@ -138,7 +162,7 @@ export function MemoryFilters() {
                   Resume Selected
                 </DropdownMenuItem>
                 <DropdownMenuItem
-                  onClick={handleDeleteSelected}
+                  onClick={() => setConfirmBulkDelete(true)}
                   className="text-red-500"
                 >
                   <FiTrash2 className="mr-2 h-4 w-4" />
@@ -149,6 +173,31 @@ export function MemoryFilters() {
           </>
         )}
       </div>
+
+      <AlertDialog open={confirmBulkDelete} onOpenChange={setConfirmBulkDelete}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>
+              Delete {selectedMemoryIds.length}{" "}
+              {selectedMemoryIds.length === 1 ? "memory" : "memories"}?
+            </AlertDialogTitle>
+            <AlertDialogDescription>
+              This permanently deletes the selected{" "}
+              {selectedMemoryIds.length === 1 ? "memory" : "memories"}. This
+              action cannot be undone.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={handleConfirmDeleteSelected}
+              className="bg-red-600 hover:bg-red-700"
+            >
+              Delete
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }

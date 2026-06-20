@@ -1,4 +1,6 @@
 import { useState, useEffect } from "react";
+import { useSelector } from "react-redux";
+import { RootState } from "@/store/store";
 import { Button } from "@/components/ui/button";
 import { Category, Client } from "../../../components/types";
 import { MemoryTable } from "./MemoryTable";
@@ -13,7 +15,15 @@ export function MemoriesSection() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const { fetchMemories } = useMemoriesApi();
-  const [memories, setMemories] = useState<any[]>([]);
+  // The list is rendered by MemoryTable from the Redux store, so read it from
+  // Redux here too (single source of truth). Mutations (delete/archive) update
+  // Redux, so the empty-state gate and the table stay in sync instead of the
+  // section holding a separate, stale copy.
+  const memories = useSelector((state: RootState) => state.memories.memories);
+  const filters = useSelector((state: RootState) => state.filters.apps);
+  const categoryItems = useSelector(
+    (state: RootState) => state.filters.categories.items
+  );
   const [totalItems, setTotalItems] = useState(0);
   const [totalPages, setTotalPages] = useState(1);
   const [isLoading, setIsLoading] = useState(true);
@@ -26,25 +36,40 @@ export function MemoriesSection() {
   const [selectedClient, setSelectedClient] = useState<Client | "all">("all");
 
   useEffect(() => {
+    let cancelled = false;
     const loadMemories = async () => {
       setIsLoading(true);
       try {
         const searchQuery = searchParams.get("search") || "";
-        const result = await fetchMemories(
-          searchQuery,
-          currentPage,
-          itemsPerPage
-        );
-        setMemories(result.memories);
+        // Forward the active filters/sort so paginating or resizing does not
+        // silently drop the filtered view. selectedApps are already ids;
+        // selectedCategories are names, so resolve them to category ids.
+        const selectedCategoryIds = categoryItems
+          .filter((cat) => filters.selectedCategories.includes(cat.name))
+          .map((cat) => cat.id);
+        const result = await fetchMemories(searchQuery, currentPage, itemsPerPage, {
+          apps: filters.selectedApps,
+          categories: selectedCategoryIds,
+          sortColumn: filters.sortColumn,
+          sortDirection: filters.sortDirection,
+          showArchived: filters.showArchived,
+        });
+        if (cancelled) return;
         setTotalItems(result.total);
         setTotalPages(result.pages);
-      } catch (error) {
+      } catch (error: any) {
+        // A newer request superseded this one — ignore.
+        if (error?.name === "AbortError") return;
         console.error("Failed to fetch memories:", error);
+      } finally {
+        if (!cancelled) setIsLoading(false);
       }
-      setIsLoading(false);
     };
 
     loadMemories();
+    return () => {
+      cancelled = true;
+    };
   }, [currentPage, itemsPerPage, fetchMemories, searchParams]);
 
   const setCurrentPage = (page: number) => {

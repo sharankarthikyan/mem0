@@ -1,3 +1,4 @@
+import { useState } from "react";
 import {
   Edit,
   MoreHorizontal,
@@ -7,6 +8,16 @@ import {
   Play,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import {
   Table,
   TableBody,
@@ -59,9 +70,25 @@ export function MemoryTable() {
   const memories = useSelector((state: RootState) => state.memories.memories);
 
   const { deleteMemories, updateMemoryState, isLoading } = useMemoriesApi();
+  const [pendingDeleteId, setPendingDeleteId] = useState<string | null>(null);
 
-  const handleDeleteMemory = (id: string) => {
-    deleteMemories([id]);
+  const handleConfirmDelete = async () => {
+    if (!pendingDeleteId) return;
+    const id = pendingDeleteId;
+    setPendingDeleteId(null);
+    try {
+      await deleteMemories([id]);
+      toast({
+        title: "Memory deleted",
+        description: "The memory has been permanently deleted.",
+      });
+    } catch (error) {
+      toast({
+        title: "Error",
+        description: "Failed to delete memory",
+        variant: "destructive",
+      });
+    }
   };
 
   const handleSelectAll = (checked: boolean) => {
@@ -107,6 +134,7 @@ export function MemoryTable() {
   };
 
   return (
+    <>
     <div className="rounded-md border">
       <Table className="">
         <TableHeader>
@@ -285,7 +313,7 @@ export function MemoryTable() {
                     <DropdownMenuSeparator />
                     <DropdownMenuItem
                       className="cursor-pointer text-red-500 focus:text-red-500"
-                      onClick={() => handleDeleteMemory(memory.id)}
+                      onClick={() => setPendingDeleteId(memory.id)}
                     >
                       <Trash2 className="mr-2 h-4 w-4" />
                       Delete
@@ -298,5 +326,30 @@ export function MemoryTable() {
         </TableBody>
       </Table>
     </div>
+      <AlertDialog
+        open={pendingDeleteId !== null}
+        onOpenChange={(open) => {
+          if (!open) setPendingDeleteId(null);
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete this memory?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This permanently deletes the memory. This action cannot be undone.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={handleConfirmDelete}
+              className="bg-red-600 hover:bg-red-700"
+            >
+              Delete
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+    </>
   );
 }
