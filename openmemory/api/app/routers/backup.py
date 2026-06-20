@@ -355,6 +355,7 @@ async def import_backup(
             cat_id_map[c["id"]] = cat.id
 
         old_to_new_id: Dict[str, UUID] = {}
+        rows_written = 0  # rows actually inserted/updated (excludes skip-mode no-ops)
         for m in sqlite_data.get("memories", []):
             incoming_id = UUID(m["id"])
             existing = db.query(Memory).filter(Memory.id == incoming_id).first()
@@ -387,6 +388,7 @@ async def import_backup(
                 existing.created_at = _parse_iso(m.get("created_at")) or existing.created_at
                 existing.updated_at = _parse_iso(m.get("updated_at")) or existing.updated_at
                 db.add(existing)
+                rows_written += 1
                 continue
 
             new_mem = Memory(
@@ -402,6 +404,7 @@ async def import_backup(
                 deleted_at=_parse_iso(m.get("deleted_at")),
             )
             db.add(new_mem)
+            rows_written += 1
 
         # Flush memory rows so the FK targets below (memory_categories,
         # status_history) resolve within the transaction.
@@ -515,7 +518,8 @@ async def import_backup(
 
     result: Dict[str, Any] = {
         "message": f'Import completed into user "{user_id}"',
-        "memories_imported": len(old_to_new_id),
+        "memories_imported": rows_written,
+        "memories_in_backup": len(old_to_new_id),
         "vectors_written": vectors_written,
         "vectors_failed": vectors_failed,
     }

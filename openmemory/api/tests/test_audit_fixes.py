@@ -266,3 +266,26 @@ def test_import_rejects_embedding_dimension_mismatch_without_writing(env, monkey
     assert "dimension" in resp.json()["detail"].lower()
     # Pre-check runs BEFORE the DB phase: nothing imported.
     assert session.query(Memory).count() == 0
+
+
+def test_import_skip_mode_count_excludes_existing(env, monkeypatch):
+    client, session = env
+    user = _make_user(session)
+    app = App(id=uuid.uuid4(), owner_id=user.id, name="openmemory", is_active=True)
+    session.add(app)
+    session.commit()
+    existing_id = uuid.uuid4()
+    session.add(
+        Memory(id=existing_id, user_id=user.id, app_id=app.id, content="old", state=MemoryState.active)
+    )
+    session.commit()
+    monkeypatch.setattr(backup_router, "get_memory_client", lambda: None)
+
+    zip_buf = _zip_backup([{"id": str(existing_id), "content": "old", "state": "active"}])
+    resp = _post_import(client, zip_buf, mode="skip")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    # The existing row is skipped, so it must NOT be counted as imported.
+    assert body["memories_imported"] == 0
+    assert body["memories_in_backup"] == 1
