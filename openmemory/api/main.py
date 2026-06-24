@@ -4,7 +4,7 @@ import os
 from uuid import uuid4
 
 from app.config import DEFAULT_APP_ID, USER_ID
-from app.database import Base, SessionLocal, engine
+from app.database import Base, SessionLocal, engine, wait_for_database
 from app.mcp_server import setup_mcp_server
 from app.models import App, User
 from app.routers import apps_router, backup_router, config_router, memories_router, stats_router
@@ -58,6 +58,11 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Wait for the database to be reachable before any startup query. On serverless
+# deployments Postgres may be cold-starting when the API boots; without this the
+# table creation below would crash the process on the first failed connect.
+wait_for_database()
 
 # Create all tables
 Base.metadata.create_all(bind=engine)

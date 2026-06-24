@@ -524,7 +524,13 @@ def get_memory_client(custom_instructions: str = None):
         if _memory_client is None or _config_hash != current_config_hash:
             print(f"Initializing memory client with config hash: {current_config_hash}")
             try:
-                _memory_client = Memory.from_config(config_dict=config)
+                # Building the client connects to the vector store (Qdrant) and
+                # creates the collection. On a serverless Qdrant that may be
+                # cold-starting, retry the build over the cold-start window
+                # instead of immediately falling back to no memory.
+                from app.utils.resilience import call_with_retry
+
+                _memory_client = call_with_retry(Memory.from_config, config_dict=config)
                 _config_hash = current_config_hash
                 print("Memory client initialized successfully")
             except Exception as init_error:

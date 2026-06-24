@@ -26,6 +26,8 @@ import anyio
 
 from app.database import SessionLocal
 from app.models import Memory, MemoryAccessLog, MemoryState, MemoryStatusHistory
+from app.utils.resilience import call_with_retry
+from sqlalchemy import text as sa_text
 from app.utils.acl import (
     filter_results_by_acl,
     filter_results_by_active_state,
@@ -66,6 +68,29 @@ def get_memory_client_safe():
         logging.warning(f"Failed to get memory client: {e}")
         return None
 
+
+def _open_db_session():
+    """Open a DB session whose connection has been validated under the transient
+    retry policy.
+
+    On a serverless Postgres that is cold-starting, the first connect can fail
+    for a few seconds. This retries acquiring a live connection (a cheap
+    ``SELECT 1``) BEFORE returning the session — so only the connection is
+    retried, never the surrounding transaction. Callers use the returned session
+    exactly as they would ``SessionLocal()``.
+    """
+
+    def _connect():
+        db = SessionLocal()
+        try:
+            db.execute(sa_text("SELECT 1"))
+            return db
+        except Exception:
+            db.close()
+            raise
+
+    return call_with_retry(_connect)
+
 # Context variables for user_id and client_name
 user_id_var: contextvars.ContextVar[str] = contextvars.ContextVar("user_id")
 client_name_var: contextvars.ContextVar[str] = contextvars.ContextVar("client_name")
@@ -92,7 +117,7 @@ async def add_memories(text: str, infer: bool = True) -> str:
         return "Error: Memory system is currently unavailable. Please try again later."
 
     try:
-        db = SessionLocal()
+        db = _open_db_session()
         try:
             # Get or create user and app
             user, app = get_user_and_app(db, user_id=uid, app_id=client_name)
@@ -101,13 +126,19 @@ async def add_memories(text: str, infer: bool = True) -> str:
             if not app.is_active:
                 return f"Error: App {app.name} is currently paused on OpenMemory. Cannot create new memories."
 
-            response = memory_client.add(text,
-                                         user_id=uid,
-                                         metadata={
-                                            "source_app": "openmemory",
-                                            "mcp_client": client_name,
-                                         },
-                                         infer=infer)
+            # Retried on transient connection errors only (see resilience.py),
+            # which by definition mean the request never reached Qdrant — so the
+            # non-idempotent add is never replayed after a partial write.
+            response = call_with_retry(
+                memory_client.add,
+                text,
+                user_id=uid,
+                metadata={
+                    "source_app": "openmemory",
+                    "mcp_client": client_name,
+                },
+                infer=infer,
+            )
 
             # Process the response and update database
             categorize_ids = []
@@ -189,7 +220,7 @@ async def search_memory(query: str) -> str:
         return "Error: Memory system is currently unavailable. Please try again later."
 
     try:
-        db = SessionLocal()
+        db = _open_db_session()
         try:
             # Get or create user and app
             user, app = get_user_and_app(db, user_id=uid, app_id=client_name)
@@ -211,7 +242,8 @@ async def search_memory(query: str) -> str:
             # a memory that was paused/archived/access-revoked after caching.
             raw_results = cache.get(uid, query) if cache else None
             if raw_results is None:
-                raw_results, _embedding = hybrid_search(
+                raw_results, _embedding = call_with_retry(
+                    hybrid_search,
                     memory_client,
                     query,
                     uid,
@@ -264,13 +296,13 @@ async def list_memories() -> str:
         return "Error: Memory system is currently unavailable. Please try again later."
 
     try:
-        db = SessionLocal()
+        db = _open_db_session()
         try:
             # Get or create user and app
             user, app = get_user_and_app(db, user_id=uid, app_id=client_name)
 
             # Get all memories (newer mem0 requires filters= instead of top-level user_id)
-            memories = memory_client.get_all(filters={"user_id": uid})
+            memories = call_with_retry(memory_client.get_all, filters={"user_id": uid})
             filtered_memories = []
 
             # Resolve ACL once, then O(1) checks (no per-memory N+1).
@@ -334,7 +366,7 @@ async def delete_memories(memory_ids: list[str]) -> str:
         return "Error: Memory system is currently unavailable. Please try again later."
 
     try:
-        db = SessionLocal()
+        db = _open_db_session()
         try:
             # Get or create user and app
             user, app = get_user_and_app(db, user_id=uid, app_id=client_name)
@@ -354,7 +386,7 @@ async def delete_memories(memory_ids: list[str]) -> str:
             # Delete from vector store
             for memory_id in ids_to_delete:
                 try:
-                    memory_client.delete(str(memory_id))
+                    call_with_retry(memory_client.delete, str(memory_id))
                 except Exception as delete_error:
                     logging.warning(f"Failed to delete memory {memory_id} from vector store: {delete_error}")
 
@@ -412,7 +444,7 @@ async def delete_all_memories() -> str:
         return "Error: Memory system is currently unavailable. Please try again later."
 
     try:
-        db = SessionLocal()
+        db = _open_db_session()
         try:
             # Get or create user and app
             user, app = get_user_and_app(db, user_id=uid, app_id=client_name)
@@ -424,7 +456,7 @@ async def delete_all_memories() -> str:
             # delete the accessible memories only
             for memory_id in accessible_memory_ids:
                 try:
-                    memory_client.delete(str(memory_id))
+                    call_with_retry(memory_client.delete, str(memory_id))
                 except Exception as delete_error:
                     logging.warning(f"Failed to delete memory {memory_id} from vector store: {delete_error}")
 

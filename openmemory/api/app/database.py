@@ -38,15 +38,46 @@ else:
     # Total connections to Postgres = (pool_size + max_overflow) * num_workers.
     # Keep that under your Postgres max_connections (small/free tiers are low).
     # All three are env-tunable so the pool can be sized to the deployment.
+    #
+    # connect_timeout bounds how long a single connect attempt blocks. On a
+    # serverless Postgres that is cold-starting, a connect can otherwise hang
+    # until the platform/socket timeout; a short bound lets wait_for_database()
+    # and the request-level retry back off and try again quickly instead.
     engine = create_engine(
         DATABASE_URL,
         pool_pre_ping=True,
         pool_size=int(os.getenv("DB_POOL_SIZE", "5")),
         max_overflow=int(os.getenv("DB_MAX_OVERFLOW", "10")),
         pool_recycle=int(os.getenv("DB_POOL_RECYCLE", "1800")),
+        connect_args={"connect_timeout": int(os.getenv("DB_CONNECT_TIMEOUT", "10"))},
     )
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+
+
+def wait_for_database():
+    """Block until the database accepts a connection, retrying with backoff.
+
+    On serverless deployments the database may be cold-starting when the API
+    boots. Call this before any startup query (table creation, default-user
+    seeding) so the process waits for the database to wake instead of crashing
+    on the first failed connect. Honors the OPENMEMORY_RETRY_* budget. SQLite is
+    always local, so this is a no-op there.
+    """
+    if _is_sqlite:
+        return
+
+    from sqlalchemy import text
+
+    # Imported lazily to avoid a circular import (resilience has no deps on this
+    # module, but keeping the import local matches the optional-startup nature).
+    from app.utils.resilience import call_with_retry
+
+    def _ping():
+        with engine.connect() as conn:
+            conn.execute(text("SELECT 1"))
+
+    call_with_retry(_ping)
 
 # Base class for models
 Base = declarative_base()
