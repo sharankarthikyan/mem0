@@ -1,8 +1,9 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { Filter, X, ChevronDown, SortAsc, SortDesc } from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
+import { Filter, Search, ChevronDown, SortAsc, SortDesc } from "lucide-react";
 import { useDispatch, useSelector } from "react-redux";
+import { Input } from "@/components/ui/input";
 
 import {
   Dialog,
@@ -61,12 +62,36 @@ export default function FilterComponent() {
     string[]
   >([]);
   const [showArchived, setShowArchived] = useState(false);
+  const [categorySearch, setCategorySearch] = useState("");
 
   const apps = useSelector((state: RootState) => state.apps.apps);
   const categories = useSelector(
     (state: RootState) => state.filters.categories.items
   );
   const filters = useSelector((state: RootState) => state.filters.apps);
+
+  // Multiple App rows can share one name (e.g. the same client registered via
+  // different paths) — show one checkbox per NAME that toggles all its ids.
+  const appGroups = useMemo(() => {
+    const groups = new Map<string, string[]>();
+    for (const app of apps) {
+      const ids = groups.get(app.name) ?? [];
+      ids.push(app.id);
+      groups.set(app.name, ids);
+    }
+    return Array.from(groups.entries())
+      .map(([name, ids]) => ({ name, ids }))
+      .sort((a, b) => a.name.localeCompare(b.name));
+  }, [apps]);
+
+  // The store can hold hundreds of auto-generated categories — render them
+  // sorted and searchable, inside a scroll container (see TabsContent below).
+  const visibleCategories = useMemo(() => {
+    const query = categorySearch.trim().toLowerCase();
+    const sorted = [...categories].sort((a, b) => a.name.localeCompare(b.name));
+    if (!query) return sorted;
+    return sorted.filter((cat) => cat.name.toLowerCase().includes(query));
+  }, [categories, categorySearch]);
 
   useEffect(() => {
     fetchApps();
@@ -82,10 +107,13 @@ export default function FilterComponent() {
     }
   }, [isOpen, filters]);
 
-  const toggleAppFilter = (app: string) => {
-    setTempSelectedApps((prev) =>
-      prev.includes(app) ? prev.filter((a) => a !== app) : [...prev, app]
-    );
+  const toggleAppGroup = (ids: string[]) => {
+    setTempSelectedApps((prev) => {
+      const allSelected = ids.every((id) => prev.includes(id));
+      return allSelected
+        ? prev.filter((id) => !ids.includes(id))
+        : Array.from(new Set([...prev, ...ids]));
+    });
   };
 
   const toggleCategoryFilter = (category: string) => {
@@ -100,8 +128,15 @@ export default function FilterComponent() {
     setTempSelectedApps(checked ? apps.map((app) => app.id) : []);
   };
 
+  // Operates on the VISIBLE (searched) set so "Select All" with a search query
+  // selects just the matches, not every category in the store.
   const toggleAllCategories = (checked: boolean) => {
-    setTempSelectedCategories(checked ? categories.map((cat) => cat.name) : []);
+    const visibleNames = visibleCategories.map((cat) => cat.name);
+    setTempSelectedCategories((prev) =>
+      checked
+        ? Array.from(new Set([...prev, ...visibleNames]))
+        : prev.filter((name) => !visibleNames.includes(name))
+    );
   };
 
   const handleClearFilters = async () => {
@@ -149,6 +184,7 @@ export default function FilterComponent() {
       setTempSelectedApps(filters.selectedApps);
       setTempSelectedCategories(filters.selectedCategories);
       setShowArchived(filters.showArchived || false);
+      setCategorySearch("");
     }
   };
 
@@ -214,7 +250,7 @@ export default function FilterComponent() {
             )}
           </Button>
         </DialogTrigger>
-        <DialogContent className="sm:max-w-[425px] bg-zinc-900 border-zinc-800 text-zinc-100">
+        <DialogContent className="sm:max-w-[425px] max-h-[85vh] overflow-hidden flex flex-col bg-zinc-900 border-zinc-800 text-zinc-100">
           <DialogHeader>
             <DialogTitle className="text-zinc-100 flex justify-between items-center">
               <span>Filters</span>
@@ -242,7 +278,7 @@ export default function FilterComponent() {
               </TabsTrigger>
             </TabsList>
             <TabsContent value="apps" className="mt-4">
-              <div className="space-y-3">
+              <div className="space-y-3 max-h-[45vh] overflow-y-auto pr-1">
                 <div className="flex items-center space-x-2">
                   <Checkbox
                     id="select-all-apps"
@@ -261,19 +297,21 @@ export default function FilterComponent() {
                     Select All
                   </Label>
                 </div>
-                {apps.map((app) => (
-                  <div key={app.id} className="flex items-center space-x-2">
+                {appGroups.map((group) => (
+                  <div key={group.name} className="flex items-center space-x-2">
                     <Checkbox
-                      id={`app-${app.id}`}
-                      checked={tempSelectedApps.includes(app.id)}
-                      onCheckedChange={() => toggleAppFilter(app.id)}
+                      id={`app-${group.name}`}
+                      checked={group.ids.every((id) =>
+                        tempSelectedApps.includes(id)
+                      )}
+                      onCheckedChange={() => toggleAppGroup(group.ids)}
                       className="border-zinc-600 data-[state=checked]:bg-primary data-[state=checked]:border-primary"
                     />
                     <Label
-                      htmlFor={`app-${app.id}`}
+                      htmlFor={`app-${group.name}`}
                       className="text-sm font-normal text-zinc-300 cursor-pointer"
                     >
-                      {app.name}
+                      {group.name}
                     </Label>
                   </div>
                 ))}
@@ -281,46 +319,73 @@ export default function FilterComponent() {
             </TabsContent>
             <TabsContent value="categories" className="mt-4">
               <div className="space-y-3">
-                <div className="flex items-center space-x-2">
-                  <Checkbox
-                    id="select-all-categories"
-                    checked={
-                      categories.length > 0 &&
-                      tempSelectedCategories.length === categories.length
-                    }
-                    onCheckedChange={(checked) =>
-                      toggleAllCategories(checked as boolean)
-                    }
-                    className="border-zinc-600 data-[state=checked]:bg-primary data-[state=checked]:border-primary"
+                <div className="relative">
+                  <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-4 w-4 text-zinc-500" />
+                  <Input
+                    placeholder="Search categories..."
+                    value={categorySearch}
+                    onChange={(e) => setCategorySearch(e.target.value)}
+                    className="pl-8 h-9 bg-zinc-800 border-zinc-700 text-zinc-100 placeholder:text-zinc-500"
                   />
-                  <Label
-                    htmlFor="select-all-categories"
-                    className="text-sm font-normal text-zinc-300 cursor-pointer"
-                  >
-                    Select All
-                  </Label>
                 </div>
-                {categories.map((category) => (
-                  <div
-                    key={category.name}
-                    className="flex items-center space-x-2"
-                  >
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center space-x-2">
                     <Checkbox
-                      id={`category-${category.name}`}
-                      checked={tempSelectedCategories.includes(category.name)}
-                      onCheckedChange={() =>
-                        toggleCategoryFilter(category.name)
+                      id="select-all-categories"
+                      checked={
+                        visibleCategories.length > 0 &&
+                        visibleCategories.every((cat) =>
+                          tempSelectedCategories.includes(cat.name)
+                        )
+                      }
+                      onCheckedChange={(checked) =>
+                        toggleAllCategories(checked as boolean)
                       }
                       className="border-zinc-600 data-[state=checked]:bg-primary data-[state=checked]:border-primary"
                     />
                     <Label
-                      htmlFor={`category-${category.name}`}
+                      htmlFor="select-all-categories"
                       className="text-sm font-normal text-zinc-300 cursor-pointer"
                     >
-                      {category.name}
+                      {categorySearch
+                        ? `Select All (${visibleCategories.length} matches)`
+                        : "Select All"}
                     </Label>
                   </div>
-                ))}
+                  {tempSelectedCategories.length > 0 && (
+                    <span className="text-xs text-zinc-500">
+                      {tempSelectedCategories.length} selected
+                    </span>
+                  )}
+                </div>
+                <div className="space-y-3 max-h-[40vh] overflow-y-auto pr-1">
+                  {visibleCategories.length === 0 && (
+                    <p className="text-sm text-zinc-500 py-2">
+                      No categories match "{categorySearch}"
+                    </p>
+                  )}
+                  {visibleCategories.map((category) => (
+                    <div
+                      key={category.name}
+                      className="flex items-center space-x-2"
+                    >
+                      <Checkbox
+                        id={`category-${category.name}`}
+                        checked={tempSelectedCategories.includes(category.name)}
+                        onCheckedChange={() =>
+                          toggleCategoryFilter(category.name)
+                        }
+                        className="border-zinc-600 data-[state=checked]:bg-primary data-[state=checked]:border-primary"
+                      />
+                      <Label
+                        htmlFor={`category-${category.name}`}
+                        className="text-sm font-normal text-zinc-300 cursor-pointer"
+                      >
+                        {category.name}
+                      </Label>
+                    </div>
+                  ))}
+                </div>
               </div>
             </TabsContent>
             <TabsContent value="archived" className="mt-4">
