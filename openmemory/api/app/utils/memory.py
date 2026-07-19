@@ -34,6 +34,7 @@ import socket
 
 from app.database import SessionLocal
 from app.models import Config as ConfigModel
+from app.utils.prompts import DEFAULT_FACT_EXTRACTION_PROMPT
 
 from mem0 import Memory
 
@@ -501,10 +502,10 @@ def get_memory_client(custom_instructions: str = None):
             print("Using default configuration")
             # Continue with default configuration if database config can't be loaded
 
-        # Use custom_instructions parameter first, then fall back to database value
+        # Use custom_instructions parameter first, then the database value, then the
+        # developer-memory default (preserves [Project]: tags, filters transient noise)
         instructions_to_use = custom_instructions or db_custom_instructions
-        if instructions_to_use:
-            config["custom_fact_extraction_prompt"] = instructions_to_use
+        config["custom_fact_extraction_prompt"] = instructions_to_use or DEFAULT_FACT_EXTRACTION_PROMPT
 
         # Fix Ollama URLs for Docker environment (applies to both env-var defaults and DB overrides)
         if config.get("llm", {}).get("provider") == "ollama":
