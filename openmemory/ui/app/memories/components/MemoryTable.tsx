@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { memo, useCallback, useState } from "react";
 import {
   Edit,
   MoreHorizontal,
@@ -59,6 +59,155 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 import { formatDate } from "@/lib/helpers";
+import type { Memory } from "@/components/types";
+
+interface MemoryRowProps {
+  memory: Memory;
+  isSelected: boolean;
+  isLoading: boolean;
+  onSelect: (id: string, checked: boolean) => void;
+  onOpen: (id: string) => void;
+  onUpdateState: (id: string, newState: string) => void;
+  onEdit: (id: string, content: string) => void;
+  onRequestDelete: (id: string) => void;
+}
+
+// Memoized so a selection change re-renders only the two affected rows instead
+// of every row on the page (each row carries a dropdown + category chips, so a
+// full-page re-render is visibly janky at size=50/100).
+const MemoryRow = memo(function MemoryRow({
+  memory,
+  isSelected,
+  isLoading,
+  onSelect,
+  onOpen,
+  onUpdateState,
+  onEdit,
+  onRequestDelete,
+}: MemoryRowProps) {
+  const isInactive = memory.state === "paused" || memory.state === "archived";
+
+  return (
+    <TableRow
+      className={`hover:bg-zinc-900/50 ${isInactive ? "text-zinc-400" : ""} ${
+        isLoading ? "animate-pulse opacity-50" : ""
+      }`}
+    >
+      <TableCell className="pl-4">
+        <Checkbox
+          className="data-[state=checked]:border-primary border-zinc-500/50"
+          checked={isSelected}
+          onCheckedChange={(checked) => onSelect(memory.id, checked as boolean)}
+        />
+      </TableCell>
+      <TableCell className="">
+        {isInactive ? (
+          <Tooltip delayDuration={0}>
+            <TooltipTrigger asChild>
+              <div
+                onClick={() => onOpen(memory.id)}
+                className="font-medium text-zinc-400 cursor-pointer"
+              >
+                {memory.memory}
+              </div>
+            </TooltipTrigger>
+            <TooltipContent>
+              <p>
+                This memory is{" "}
+                <span className="font-bold">
+                  {memory.state === "paused" ? "paused" : "archived"}
+                </span>{" "}
+                and <span className="font-bold">disabled</span>.
+              </p>
+            </TooltipContent>
+          </Tooltip>
+        ) : (
+          <div
+            onClick={() => onOpen(memory.id)}
+            className="font-medium text-white cursor-pointer"
+          >
+            {memory.memory}
+          </div>
+        )}
+      </TableCell>
+      <TableCell className="">
+        <div className="flex flex-wrap gap-1">
+          <Categories
+            categories={memory.categories}
+            isPaused={isInactive}
+            concat={true}
+          />
+        </div>
+      </TableCell>
+      <TableCell className="w-[140px] text-center">
+        <SourceApp source={memory.app_name} />
+      </TableCell>
+      <TableCell className="w-[140px] text-center">
+        {formatDate(memory.created_at)}
+      </TableCell>
+      <TableCell className="text-right flex justify-center">
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <Button variant="ghost" size="icon" className="h-8 w-8">
+              <MoreHorizontal className="h-4 w-4" />
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent
+            align="end"
+            className="bg-zinc-900 border-zinc-800"
+          >
+            <DropdownMenuItem
+              className="cursor-pointer"
+              onClick={() => {
+                const newState =
+                  memory.state === "active" ? "paused" : "active";
+                onUpdateState(memory.id, newState);
+              }}
+            >
+              {memory?.state === "active" ? (
+                <>
+                  <Pause className="mr-2 h-4 w-4" />
+                  Pause
+                </>
+              ) : (
+                <>
+                  <Play className="mr-2 h-4 w-4" />
+                  Resume
+                </>
+              )}
+            </DropdownMenuItem>
+            <DropdownMenuItem
+              className="cursor-pointer"
+              onClick={() => {
+                const newState =
+                  memory.state === "active" ? "archived" : "active";
+                onUpdateState(memory.id, newState);
+              }}
+            >
+              <Archive className="mr-2 h-4 w-4" />
+              {memory?.state !== "archived" ? <>Archive</> : <>Unarchive</>}
+            </DropdownMenuItem>
+            <DropdownMenuItem
+              className="cursor-pointer"
+              onClick={() => onEdit(memory.id, memory.memory)}
+            >
+              <Edit className="mr-2 h-4 w-4" />
+              Edit
+            </DropdownMenuItem>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem
+              className="cursor-pointer text-red-500 focus:text-red-500"
+              onClick={() => onRequestDelete(memory.id)}
+            >
+              <Trash2 className="mr-2 h-4 w-4" />
+              Delete
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
+      </TableCell>
+    </TableRow>
+  );
+});
 
 export function MemoryTable() {
   const { toast } = useToast();
@@ -99,43 +248,62 @@ export function MemoryTable() {
     }
   };
 
-  const handleSelectMemory = (id: string, checked: boolean) => {
-    if (checked) {
-      dispatch(selectMemory(id));
-    } else {
-      dispatch(deselectMemory(id));
-    }
-  };
+  const handleSelectMemory = useCallback(
+    (id: string, checked: boolean) => {
+      if (checked) {
+        dispatch(selectMemory(id));
+      } else {
+        dispatch(deselectMemory(id));
+      }
+    },
+    [dispatch]
+  );
   const { handleOpenUpdateMemoryDialog } = useUI();
 
-  const handleEditMemory = (memory_id: string, memory_content: string) => {
-    handleOpenUpdateMemoryDialog(memory_id, memory_content);
-  };
+  const handleEditMemory = useCallback(
+    (memory_id: string, memory_content: string) => {
+      handleOpenUpdateMemoryDialog(memory_id, memory_content);
+    },
+    [handleOpenUpdateMemoryDialog]
+  );
 
-  const handleUpdateMemoryState = async (id: string, newState: string) => {
-    try {
-      await updateMemoryState([id], newState);
-    } catch (error) {
-      toast({
-        title: "Error",
-        description: "Failed to update memory state",
-        variant: "destructive",
-      });
-    }
-  };
+  const handleUpdateMemoryState = useCallback(
+    async (id: string, newState: string) => {
+      try {
+        await updateMemoryState([id], newState);
+      } catch (error) {
+        toast({
+          title: "Error",
+          description: "Failed to update memory state",
+          variant: "destructive",
+        });
+      }
+    },
+    [updateMemoryState, toast]
+  );
 
   const isAllSelected =
     memories.length > 0 && selectedMemoryIds.length === memories.length;
   const isPartiallySelected =
     selectedMemoryIds.length > 0 && selectedMemoryIds.length < memories.length;
 
-  const handleMemoryClick = (id: string) => {
-    router.push(`/memory/${id}`);
-  };
+  const handleMemoryClick = useCallback(
+    (id: string) => {
+      router.push(`/memory/${id}`);
+    },
+    [router]
+  );
+
+  const handleRequestDelete = useCallback((id: string) => {
+    setPendingDeleteId(id);
+  }, []);
 
   return (
     <>
     <div className="rounded-md border">
+      {/* One provider for the whole table — previously each paused/archived row
+          mounted its own TooltipProvider. */}
+      <TooltipProvider>
       <Table className="">
         <TableHeader>
           <TableRow className="bg-zinc-800 hover:bg-zinc-800">
@@ -186,145 +354,21 @@ export function MemoryTable() {
         </TableHeader>
         <TableBody>
           {memories.map((memory) => (
-            <TableRow
+            <MemoryRow
               key={memory.id}
-              className={`hover:bg-zinc-900/50 ${
-                memory.state === "paused" || memory.state === "archived"
-                  ? "text-zinc-400"
-                  : ""
-              } ${isLoading ? "animate-pulse opacity-50" : ""}`}
-            >
-              <TableCell className="pl-4">
-                <Checkbox
-                  className="data-[state=checked]:border-primary border-zinc-500/50"
-                  checked={selectedMemoryIds.includes(memory.id)}
-                  onCheckedChange={(checked) =>
-                    handleSelectMemory(memory.id, checked as boolean)
-                  }
-                />
-              </TableCell>
-              <TableCell className="">
-                {memory.state === "paused" || memory.state === "archived" ? (
-                  <TooltipProvider>
-                    <Tooltip delayDuration={0}>
-                      <TooltipTrigger asChild>
-                        <div
-                          onClick={() => handleMemoryClick(memory.id)}
-                          className={`font-medium ${
-                            memory.state === "paused" ||
-                            memory.state === "archived"
-                              ? "text-zinc-400"
-                              : "text-white"
-                          } cursor-pointer`}
-                        >
-                          {memory.memory}
-                        </div>
-                      </TooltipTrigger>
-                      <TooltipContent>
-                        <p>
-                          This memory is{" "}
-                          <span className="font-bold">
-                            {memory.state === "paused" ? "paused" : "archived"}
-                          </span>{" "}
-                          and <span className="font-bold">disabled</span>.
-                        </p>
-                      </TooltipContent>
-                    </Tooltip>
-                  </TooltipProvider>
-                ) : (
-                  <div
-                    onClick={() => handleMemoryClick(memory.id)}
-                    className={`font-medium text-white cursor-pointer`}
-                  >
-                    {memory.memory}
-                  </div>
-                )}
-              </TableCell>
-              <TableCell className="">
-                <div className="flex flex-wrap gap-1">
-                  <Categories
-                    categories={memory.categories}
-                    isPaused={
-                      memory.state === "paused" || memory.state === "archived"
-                    }
-                    concat={true}
-                  />
-                </div>
-              </TableCell>
-              <TableCell className="w-[140px] text-center">
-                <SourceApp source={memory.app_name} />
-              </TableCell>
-              <TableCell className="w-[140px] text-center">
-                {formatDate(memory.created_at)}
-              </TableCell>
-              <TableCell className="text-right flex justify-center">
-                <DropdownMenu>
-                  <DropdownMenuTrigger asChild>
-                    <Button variant="ghost" size="icon" className="h-8 w-8">
-                      <MoreHorizontal className="h-4 w-4" />
-                    </Button>
-                  </DropdownMenuTrigger>
-                  <DropdownMenuContent
-                    align="end"
-                    className="bg-zinc-900 border-zinc-800"
-                  >
-                    <DropdownMenuItem
-                      className="cursor-pointer"
-                      onClick={() => {
-                        const newState =
-                          memory.state === "active" ? "paused" : "active";
-                        handleUpdateMemoryState(memory.id, newState);
-                      }}
-                    >
-                      {memory?.state === "active" ? (
-                        <>
-                          <Pause className="mr-2 h-4 w-4" />
-                          Pause
-                        </>
-                      ) : (
-                        <>
-                          <Play className="mr-2 h-4 w-4" />
-                          Resume
-                        </>
-                      )}
-                    </DropdownMenuItem>
-                    <DropdownMenuItem
-                      className="cursor-pointer"
-                      onClick={() => {
-                        const newState =
-                          memory.state === "active" ? "archived" : "active";
-                        handleUpdateMemoryState(memory.id, newState);
-                      }}
-                    >
-                      <Archive className="mr-2 h-4 w-4" />
-                      {memory?.state !== "archived" ? (
-                        <>Archive</>
-                      ) : (
-                        <>Unarchive</>
-                      )}
-                    </DropdownMenuItem>
-                    <DropdownMenuItem
-                      className="cursor-pointer"
-                      onClick={() => handleEditMemory(memory.id, memory.memory)}
-                    >
-                      <Edit className="mr-2 h-4 w-4" />
-                      Edit
-                    </DropdownMenuItem>
-                    <DropdownMenuSeparator />
-                    <DropdownMenuItem
-                      className="cursor-pointer text-red-500 focus:text-red-500"
-                      onClick={() => setPendingDeleteId(memory.id)}
-                    >
-                      <Trash2 className="mr-2 h-4 w-4" />
-                      Delete
-                    </DropdownMenuItem>
-                  </DropdownMenuContent>
-                </DropdownMenu>
-              </TableCell>
-            </TableRow>
+              memory={memory}
+              isSelected={selectedMemoryIds.includes(memory.id)}
+              isLoading={isLoading}
+              onSelect={handleSelectMemory}
+              onOpen={handleMemoryClick}
+              onUpdateState={handleUpdateMemoryState}
+              onEdit={handleEditMemory}
+              onRequestDelete={handleRequestDelete}
+            />
           ))}
         </TableBody>
       </Table>
+      </TooltipProvider>
     </div>
       <AlertDialog
         open={pendingDeleteId !== null}

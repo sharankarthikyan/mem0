@@ -1,5 +1,4 @@
 "use client";
-import { useMemoriesApi } from "@/hooks/useMemoriesApi";
 import { MemoryActions } from "./MemoryActions";
 import { ArrowLeft, Copy, Check } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -7,7 +6,7 @@ import { useRouter } from "next/navigation";
 import { AccessLog } from "./AccessLog";
 import Image from "next/image";
 import Categories from "@/components/shared/categories";
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { useSelector } from "react-redux";
 import { RootState } from "@/store/store";
 import { constants } from "@/components/shared/source-app";
@@ -19,7 +18,6 @@ interface MemoryDetailsProps {
 
 export function MemoryDetails({ memory_id }: MemoryDetailsProps) {
   const router = useRouter();
-  const { fetchMemoryById, hasUpdates } = useMemoriesApi();
   const memory = useSelector(
     (state: RootState) => state.memories.selectedMemory
   );
@@ -32,10 +30,6 @@ export function MemoryDetails({ memory_id }: MemoryDetailsProps) {
       setTimeout(() => setCopied(false), 2000);
     }
   };
-
-  useEffect(() => {
-    fetchMemoryById(memory_id);
-  }, []);
 
   return (
     <div className="container mx-auto py-6 px-4">

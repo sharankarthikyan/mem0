@@ -104,6 +104,7 @@ class Memory(Base):
         Index('idx_memory_user_state', 'user_id', 'state'),
         Index('idx_memory_app_state', 'app_id', 'state'),
         Index('idx_memory_user_app', 'user_id', 'app_id'),
+        Index('idx_memory_user_created', 'user_id', 'created_at'),
     )
 
 

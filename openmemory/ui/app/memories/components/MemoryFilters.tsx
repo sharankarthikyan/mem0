@@ -88,9 +88,19 @@ export function MemoryFilters() {
     }
   };
 
-  // add debounce
+  // Debounced search: preserve existing params (notably size) and reset page to 1
+  // in ONE navigation — pushing a bare ?search= URL made MemoriesPage re-push to
+  // re-add page/size, firing the list query twice per keystroke burst.
   const handleSearch = debounce(async (query: string) => {
-    router.push(`/memories?search=${query}`);
+    const params = new URLSearchParams(searchParams.toString());
+    if (query) {
+      params.set("search", query);
+    } else {
+      params.delete("search");
+    }
+    params.set("page", "1");
+    if (!params.has("size")) params.set("size", "10");
+    router.push(`/memories?${params.toString()}`);
   }, 500);
 
   useEffect(() => {

@@ -12,6 +12,7 @@ from app.models import (
     MemoryState,
     MemoryStatusHistory,
     User,
+    memory_categories,
 )
 from app.schemas import MemoryResponse
 from app.utils.acl import make_memory_access_checker
@@ -64,7 +65,7 @@ def update_memory_state(db: Session, memory_id: UUID, new_state: MemoryState, us
 
 # List all memories with filtering
 @router.get("/", response_model=Page[MemoryResponse])
-async def list_memories(
+def list_memories(
     user_id: str,
     app_id: Optional[UUID] = None,
     from_date: Optional[int] = Query(
@@ -88,11 +89,12 @@ async def list_memories(
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
 
-    # Build base query
+    # Build base query. Filter to active in SQL so pagination and total match
+    # what the ACL transformer would return (previously paused rows were fetched,
+    # counted in total, then dropped post-pagination → short pages, wrong totals).
     query = db.query(Memory).filter(
         Memory.user_id == user.id,
-        Memory.state != MemoryState.deleted,
-        Memory.state != MemoryState.archived,
+        Memory.state == MemoryState.active,
         Memory.content.ilike(f"%{search_query}%") if search_query else True
     )
 
@@ -155,7 +157,7 @@ async def list_memories(
 
 # Get all categories
 @router.get("/categories")
-async def get_categories(
+def get_categories(
     user_id: str,
     db: Session = Depends(get_db)
 ):
@@ -163,13 +165,20 @@ async def get_categories(
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
 
-    # Get unique categories associated with the user's memories
-    # Get all memories
-    memories = db.query(Memory).filter(Memory.user_id == user.id, Memory.state != MemoryState.deleted, Memory.state != MemoryState.archived).all()
-    # Get all categories from memories
-    categories = [category for memory in memories for category in memory.categories]
-    # Get unique categories
-    unique_categories = list(set(categories))
+    # Distinct categories via the join table in ONE query. The previous version
+    # loaded every memory row and lazy-loaded categories per memory (~1 query per
+    # memory), which at 10k memories meant ~10k queries per call.
+    unique_categories = (
+        db.query(Category)
+        .join(memory_categories, Category.id == memory_categories.c.category_id)
+        .join(Memory, Memory.id == memory_categories.c.memory_id)
+        .filter(
+            Memory.user_id == user.id,
+            Memory.state.notin_([MemoryState.deleted, MemoryState.archived]),
+        )
+        .distinct()
+        .all()
+    )
 
     return {
         "categories": unique_categories,
@@ -187,7 +196,7 @@ class CreateMemoryRequest(BaseModel):
 
 # Create new memory
 @router.post("/")
-async def create_memory(
+def create_memory(
     request: CreateMemoryRequest,
     db: Session = Depends(get_db)
 ):
@@ -324,7 +333,7 @@ async def create_memory(
 
 # Get memory by ID
 @router.get("/{memory_id}")
-async def get_memory(
+def get_memory(
     memory_id: UUID,
     db: Session = Depends(get_db)
 ):
@@ -347,7 +356,7 @@ class DeleteMemoriesRequest(BaseModel):
 
 # Delete multiple memories
 @router.delete("/")
-async def delete_memories(
+def delete_memories(
     request: DeleteMemoriesRequest,
     db: Session = Depends(get_db)
 ):
@@ -390,7 +399,7 @@ async def delete_memories(
 
 # Archive memories
 @router.post("/actions/archive")
-async def archive_memories(
+def archive_memories(
     memory_ids: List[UUID],
     user_id: UUID,
     db: Session = Depends(get_db)
@@ -411,7 +420,7 @@ class PauseMemoriesRequest(BaseModel):
 
 # Pause access to memories
 @router.post("/actions/pause")
-async def pause_memories(
+def pause_memories(
     request: PauseMemoriesRequest,
     db: Session = Depends(get_db)
 ):
@@ -484,7 +493,7 @@ async def pause_memories(
 
 # Get memory access logs
 @router.get("/{memory_id}/access-log")
-async def get_memory_access_log(
+def get_memory_access_log(
     memory_id: UUID,
     page: int = Query(1, ge=1),
     page_size: int = Query(10, ge=1, le=100),
@@ -513,7 +522,7 @@ class UpdateMemoryRequest(BaseModel):
 
 # Update a memory
 @router.put("/{memory_id}")
-async def update_memory(
+def update_memory(
     memory_id: UUID,
     request: UpdateMemoryRequest,
     db: Session = Depends(get_db)
@@ -548,7 +557,7 @@ class FilterMemoriesRequest(BaseModel):
     show_archived: Optional[bool] = False
 
 @router.post("/filter", response_model=Page[MemoryResponse])
-async def filter_memories(
+def filter_memories(
     request: FilterMemoriesRequest,
     db: Session = Depends(get_db)
 ):
@@ -642,7 +651,7 @@ async def filter_memories(
 
 
 @router.get("/{memory_id}/related", response_model=Page[MemoryResponse])
-async def get_related_memories(
+def get_related_memories(
     memory_id: UUID,
     user_id: str,
     params: Params = Depends(),

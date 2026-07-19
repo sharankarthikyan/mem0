@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session
 router = APIRouter(prefix="/api/v1/stats", tags=["stats"])
 
 @router.get("/")
-async def get_profile(
+def get_profile(
     user_id: str,
     db: Session = Depends(get_db)
 ):

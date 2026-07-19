@@ -18,7 +18,7 @@ def get_app_or_404(db: Session, app_id: UUID) -> App:
 
 # List all apps with filtering
 @router.get("/")
-async def list_apps(
+def list_apps(
     name: Optional[str] = None,
     is_active: Optional[bool] = None,
     sort_by: str = 'name',
@@ -78,7 +78,14 @@ async def list_apps(
     else:
         query = query.order_by(sort_field)
 
-    total = query.count()
+    # Count plain App rows with the same filters instead of wrapping the whole
+    # aggregated 3-way join in SELECT count(*) FROM (...).
+    count_query = db.query(func.count(App.id))
+    if name:
+        count_query = count_query.filter(App.name.ilike(f"%{name}%"))
+    if is_active is not None:
+        count_query = count_query.filter(App.is_active == is_active)
+    total = count_query.scalar()
     apps = query.offset((page - 1) * page_size).limit(page_size).all()
 
     return {
@@ -99,7 +106,7 @@ async def list_apps(
 
 # Get app details
 @router.get("/{app_id}")
-async def get_app_details(
+def get_app_details(
     app_id: UUID,
     db: Session = Depends(get_db)
 ):
@@ -124,7 +131,7 @@ async def get_app_details(
 
 # List memories created by app
 @router.get("/{app_id}/memories")
-async def list_app_memories(
+def list_app_memories(
     app_id: UUID,
     page: int = Query(1, ge=1),
     page_size: int = Query(10, ge=1, le=100),
@@ -160,7 +167,7 @@ async def list_app_memories(
 
 # List memories accessed by app
 @router.get("/{app_id}/accessed")
-async def list_app_accessed_memories(
+def list_app_accessed_memories(
     app_id: UUID,
     page: int = Query(1, ge=1),
     page_size: int = Query(10, ge=1, le=100),
@@ -182,8 +189,9 @@ async def list_app_accessed_memories(
         desc("access_count")
     )
 
-    # Add eager loading for categories
-    query = query.options(joinedload(Memory.categories))
+    # Eager-load categories and app (app_name is read per row below — without
+    # this each row fires an extra SELECT for memory.app).
+    query = query.options(joinedload(Memory.categories), joinedload(Memory.app))
 
     total = query.count()
     results = query.offset((page - 1) * page_size).limit(page_size).all()
@@ -212,7 +220,7 @@ async def list_app_accessed_memories(
 
 
 @router.put("/{app_id}")
-async def update_app_details(
+def update_app_details(
     app_id: UUID,
     is_active: bool,
     db: Session = Depends(get_db)

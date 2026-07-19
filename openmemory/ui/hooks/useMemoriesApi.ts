@@ -1,4 +1,4 @@
-import { useState, useCallback, useRef } from 'react';
+import { useState, useCallback } from 'react';
 import axios from 'axios';
 import { Memory, Client, Category } from '@/components/types';
 import { useDispatch, useSelector } from 'react-redux';
@@ -95,6 +95,12 @@ interface UseMemoriesApiReturn {
   selectedMemory: SimpleMemory | null;
 }
 
+// Module-scoped so ALL hook instances share one in-flight list request. A per-
+// instance ref only deduped a component against itself, so two components
+// fetching concurrently (e.g. list page + filter panel) raced and the loser
+// clobbered the winner's rows in Redux.
+let fetchMemoriesAbort: AbortController | null = null;
+
 export const useMemoriesApi = (): UseMemoriesApiReturn => {
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
@@ -103,10 +109,6 @@ export const useMemoriesApi = (): UseMemoriesApiReturn => {
   const user_id = useSelector((state: RootState) => state.profile.userId);
   const memories = useSelector((state: RootState) => state.memories.memories);
   const selectedMemory = useSelector((state: RootState) => state.memories.selectedMemory);
-  // Tracks the in-flight list request so a newer fetch (page/filter/search change)
-  // cancels the older one — otherwise a slow earlier response can resolve last and
-  // overwrite the list with stale rows.
-  const fetchMemoriesAbortRef = useRef<AbortController | null>(null);
 
   // All API traffic flows through the same-origin Next proxy at /api/[...path].
   // Using a relative base ("") keeps every request same-origin (no CORS, no CF
@@ -127,10 +129,10 @@ export const useMemoriesApi = (): UseMemoriesApiReturn => {
       showArchived?: boolean;
     }
   ): Promise<{ memories: Memory[], total: number, pages: number }> => {
-    // Cancel any list request still in flight before starting a new one.
-    fetchMemoriesAbortRef.current?.abort();
+    // Cancel any list request still in flight (from ANY component) first.
+    fetchMemoriesAbort?.abort();
     const controller = new AbortController();
-    fetchMemoriesAbortRef.current = controller;
+    fetchMemoriesAbort = controller;
 
     setIsLoading(true);
     setError(null);

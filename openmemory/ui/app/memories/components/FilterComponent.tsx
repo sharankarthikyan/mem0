@@ -82,10 +82,6 @@ export default function FilterComponent() {
     }
   }, [isOpen, filters]);
 
-  useEffect(() => {
-    handleClearFilters();
-  }, []);
-
   const toggleAppFilter = (app: string) => {
     setTempSelectedApps((prev) =>
       prev.includes(app) ? prev.filter((a) => a !== app) : [...prev, app]
